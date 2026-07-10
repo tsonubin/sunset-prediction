@@ -2,12 +2,12 @@
 
 # API Keys & Credentials
 .env
-*.env.*
+.env.*
+!.env.example
 credentials*
 **/credentials*
 *secret*
 *token*
-*key*
 
 # Python
 __pycache__/

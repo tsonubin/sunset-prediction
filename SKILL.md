@@ -70,7 +70,7 @@ triggers:
   格式化输出 ──── 质量评分 + 黄金时段(CST) + 拍摄建议 + 杭州机位
         │
         ▼
-  Discord 推送 ──── 可读报告
+  推送层 ──── Server酱（微信）/ Discord 格式 / Vercel Cron
 ```
 
 ---
@@ -124,9 +124,13 @@ python3 predict-sunset.py --location 杭州 --short        # 一行摘要
 python3 predict-sunset.py --lat 30.27 --lng 120.15       # 精确坐标
 ```
 
-### Cron 自动推送
+### Cron / Server酱自动推送
 ```bash
-每天 16:00 → 预测今晚晚霞 → Discord
+# 本地
+export SERVERCHAN_SENDKEY=SCTxxxxxxxx   # 仅环境变量，勿写入代码
+python3 scripts/predict-sunset.py --location 杭州 --serverchan
+
+# Vercel：配置 SERVERCHAN_SENDKEY 后，每天 16:00 CST → /api/cron → 微信
 ```
 
 ### 嵌入代码
@@ -177,13 +181,17 @@ print(result["short_summary"])    # "🔥 杭州: 76%"
 sunset-prediction/
 ├── SKILL.md                            ← 本文件（Hermes/Claude Agent 技能）
 ├── README.md                           ← GitHub 主页
+├── vercel.json                         ← Vercel Functions + 每日 Cron
+├── .env.example                        ← 环境变量模板
 ├── requirements.txt                    ← 依赖
 ├── LICENSE                             ← MIT
+├── api/                                ← Vercel Serverless（predict + cron）
 ├── references/
 │   ├── locations.md                    ← 21城坐标 + 杭州8个摄影点
+│   ├── serverchan-api.md               ← Server酱推送
 │   └── sunsethue-api.md               ← API 文档参考
 └── scripts/
-    └── predict-sunset.py               ← 核心脚本（638行，双引擎，5因子模型）
+    └── predict-sunset.py               ← 核心脚本（双引擎 + Server酱）
 ```
 
 ---

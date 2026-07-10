@@ -17,13 +17,15 @@
     python3 predict-sunset.py --discord          # Discord 格式输出
 
 环境变量:
-    SUNSETHUE_API_KEY    — Sunsethue API key（可选）
-    SUNSET_LOCATION      — 默认城市名（可选，默认 "杭州"）
+    SUNSETHUE_API_KEY     — Sunsethue API key（可选）
+    SUNSET_LOCATION       — 默认城市名（可选，默认 "杭州"）
+    SERVERCHAN_SENDKEY    — Server酱 Turbo SendKey（可选，推送到微信）
 """
 
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -79,6 +81,81 @@ def _http_get(url, headers=None):
             return json.loads(resp.read().decode())
     except Exception as e:
         return {"_error": str(e)}
+
+
+def _http_post_form(url, fields, timeout=15):
+    """POST application/x-www-form-urlencoded，返回 JSON dict 或 {_error}"""
+    data = urllib.parse.urlencode(fields).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode()
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {"raw": body}
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode() if e.fp else ""
+        try:
+            parsed = json.loads(err_body) if err_body else {}
+        except json.JSONDecodeError:
+            parsed = {"raw": err_body}
+        parsed["_error"] = f"HTTP {e.code}: {e.reason}"
+        return parsed
+    except Exception as e:
+        return {"_error": str(e)}
+
+
+# ── Server酱 Turbo 推送 ─────────────────────────────────────
+
+def send_serverchan(title, desp="", sendkey=None, short=None):
+    """
+    通过 Server酱 Turbo 推送消息到微信/企业微信等通道。
+
+    API: POST https://sctapi.ftqq.com/<SendKey>.send
+    文档: https://sct.ftqq.com/
+
+    Args:
+        title: 消息标题（必填，最长 32 字左右建议）
+        desp:  消息正文，支持 Markdown
+        sendkey: SendKey；默认读环境变量 SERVERCHAN_SENDKEY
+        short: 可选短摘要（部分通道展示）
+
+    Returns:
+        dict: Server酱响应，或 {"error": "..."}
+    """
+    key = (sendkey or os.environ.get("SERVERCHAN_SENDKEY", "")).strip()
+    if not key:
+        return {"error": "SERVERCHAN_SENDKEY 未配置"}
+
+    url = f"https://sctapi.ftqq.com/{urllib.parse.quote(key)}.send"
+    fields = {"title": title, "desp": desp}
+    if short:
+        fields["short"] = short
+
+    result = _http_post_form(url, fields)
+    if "_error" in result:
+        return {
+            "error": result["_error"],
+            "detail": {k: v for k, v in result.items() if k != "_error"},
+        }
+
+    # 成功时 code 通常为 0
+    code = result.get("code")
+    if code is not None and code != 0:
+        return {
+            "error": result.get("message") or f"Server酱返回 code={code}",
+            "detail": result,
+        }
+    return result
 
 
 def _hour_index_for_date(hourly_times, target_date, sunset_hour=18):
@@ -408,8 +485,24 @@ def _est_golden_hour(sunset_time):
         return "", ""
 
 
+def format_serverchan_title(result, location_name, date_str, event_type):
+    """Server酱标题（宜短）"""
+    quality = result.get("quality", 0)
+    emoji = quality_emoji(quality)
+    event_label = "晚霞" if event_type == "sunset" else "朝霞"
+    return f"{emoji} {location_name}{event_label} {quality:.0%} · {date_str}"
+
+
+def format_serverchan_desp(result, location_name, date_str, event_type):
+    """
+    Server酱正文：复用 Discord 报告，去掉粗体标记以适配部分通道。
+    """
+    msg = format_discord_message(result, location_name, date_str, event_type)
+    return msg.replace("**", "")
+
+
 def format_discord_message(result, location_name, date_str, event_type):
-    """生成 Discord 格式消息"""
+    """生成 Discord / 通用可读报告"""
     quality = result.get("quality", 0)
     emoji = quality_emoji(quality)
     label = quality_label(quality)
@@ -590,6 +683,8 @@ def run_prediction(location=None, lat=None, lng=None,
 
     discord_msg = format_discord_message(raw, location_name, date_str, event_type)
     short_summary = f"{quality_emoji(raw['quality'])} {location_name} {date_str}: {raw['quality']:.0%}"
+    sc_title = format_serverchan_title(raw, location_name, date_str, event_type)
+    sc_desp = format_serverchan_desp(raw, location_name, date_str, event_type)
 
     return {
         "quality": raw["quality"],
@@ -600,6 +695,8 @@ def run_prediction(location=None, lat=None, lng=None,
         "event_type": event_type,
         "short_summary": short_summary,
         "discord_message": discord_msg,
+        "serverchan_title": sc_title,
+        "serverchan_desp": sc_desp,
     }
 
 
@@ -614,7 +711,10 @@ def main():
     parser.add_argument("--date", type=str, default=None)
     parser.add_argument("--type", dest="event_type", type=str,
                         default="sunset", choices=["sunset", "sunrise"])
-    parser.add_argument("--discord", action="store_true")
+    parser.add_argument("--discord", action="store_true",
+                        help="输出 Discord/可读报告格式（默认）")
+    parser.add_argument("--serverchan", action="store_true",
+                        help="预测后通过 Server酱推送到微信（需 SERVERCHAN_SENDKEY）")
     parser.add_argument("--short", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -628,18 +728,35 @@ def main():
         print(f"❌ {result['error']}")
         sys.exit(1)
 
+    push_result = None
+    if args.serverchan:
+        push_result = send_serverchan(
+            title=result["serverchan_title"],
+            desp=result["serverchan_desp"],
+            short=result["short_summary"],
+        )
+        if "error" in push_result:
+            print(f"❌ Server酱推送失败: {push_result['error']}", file=sys.stderr)
+            if push_result.get("detail"):
+                print(json.dumps(push_result["detail"], ensure_ascii=False), file=sys.stderr)
+            sys.exit(2)
+        print(f"✅ Server酱已推送: {result['serverchan_title']}", file=sys.stderr)
+
     if args.short:
         print(result["short_summary"])
     elif args.json:
-        print(json.dumps({
+        payload = {
             "quality": result["quality"],
             "source": result["source"],
             "location": result["location"],
             "date": result["date"],
             "short": result["short_summary"],
-        }, ensure_ascii=False, indent=2))
+        }
+        if push_result is not None:
+            payload["serverchan"] = push_result
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        # --discord or plain
+        # --discord / --serverchan / plain
         print(result["discord_message"])
 
 

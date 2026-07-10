@@ -16,9 +16,10 @@
 - ⏰ **提前 24 小时**告诉你明天晚霞质量——不是"可能有晚霞"的废话，是 **76% 火烧云级别**这样的精确数字
 - 🧠 **超越专业模型的精度**：v2.0 研究驱动型引擎（基于 AOD 气溶胶光学厚度 + 云型分类 + 能见度 + 湿度 + 降水 五因子模型）——在盲测中比 Sunsethue 付费 API 准确度高 **2.2 倍**
 - 📸 **摄影师级建议**：黄金时段精确到分钟、推荐机位、穿搭建议、器材准备清单
-- 🤖 **全自动推送**：每天 16:00 准时推送到你的 Discord——看一眼就知道今晚出不出工
+- 🤖 **全自动推送**：每天 16:00 准时推送到 **Server酱（微信）** 或 Discord 格式输出——看一眼就知道今晚出不出工
+- ☁️ **Vercel 一键部署**：Serverless API + 定时 Cron，环境变量配置 SendKey
 - 🌍 **全球覆盖**：支持 21 个中国主要城市 + 任意经纬度坐标
-- 💰 **零成本运行**：主引擎完全免费（Open-Meteo），无需 API key，没有额度限制
+- 💰 **零成本运行**：主引擎完全免费（Open-Meteo），无需气象 API key，没有额度限制
 
 ---
 
@@ -52,12 +53,46 @@ pip install -r requirements.txt
 python scripts/predict-sunset.py --location 杭州 --discord
 ```
 
-### 3. 设置定时推送（可选）
+### 3. Server酱推送到微信（可选）
+
+```bash
+# SendKey 只放环境变量，不要写进代码
+export SERVERCHAN_SENDKEY=SCTxxxxxxxx   # 从 https://sct.ftqq.com/sendkey 复制
+python scripts/predict-sunset.py --location 杭州 --serverchan
+```
+
+### 4. 部署到 Vercel（推荐：定时推送）
+
+1. 把仓库导入 [Vercel](https://vercel.com)
+2. 在 **Settings → Environment Variables** 配置：
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `SERVERCHAN_SENDKEY` | ✅ 推送时 | Server酱 SendKey（`SCT…`） |
+| `SUNSET_LOCATION` | 否 | 默认城市，如 `杭州` |
+| `CRON_SECRET` | 建议 | 保护 `/api/cron` 与 `?push=1` |
+
+3. Deploy 后每天 **16:00（北京时间）** 自动跑 `/api/cron` 并推送  
+   （`vercel.json` 中 schedule 为 `0 8 * * *` UTC）
+
+手动触发示例：
+
+```bash
+# 仅预测
+curl "https://your-app.vercel.app/api/predict?location=杭州"
+
+# 预测并推送（若设置了 CRON_SECRET）
+curl -H "Authorization: Bearer $CRON_SECRET" \
+  "https://your-app.vercel.app/api/predict?location=杭州&push=1"
+```
+
+### 5. 本地 crontab（可选，不用 Vercel 时）
 
 ```bash
 crontab -e
 # 每天 16:00 推送今晚晚霞预报
-0 16 * * * cd /path/to/sunset-prediction && python scripts/predict-sunset.py --location 杭州 --discord
+0 16 * * * cd /path/to/sunset-prediction && \
+  SERVERCHAN_SENDKEY=SCTxxx python scripts/predict-sunset.py --location 杭州 --serverchan
 ```
 
 ---
@@ -81,9 +116,9 @@ python predict-sunset.py --location 北京 --date 2026-05-13
 # 下周末北京晚霞一般，建议改期
 ```
 
-### 🤖 自动推送（Discord）
+### 🤖 自动推送（Server酱 → 微信）
 ```
-每天 16:00 → Discord 自动推送
+每天 16:00 → Server酱 → 微信
 🌅 杭州 晚霞预报 · 2026-05-06
 ━━━━━━━━━━━━━━━━━━━
 🔥 评分：76% — 绝佳！火烧云级别
@@ -133,22 +168,26 @@ python predict-sunset.py --location 北京 --date 2026-05-13
 
 ```bash
 # 基本用法
-python predict-sunset.py --location 杭州             # 今晚晚霞
-python predict-sunset.py --location 北京 --discord    # Discord 格式
-python predict-sunset.py --location 杭州 --short      # 一行摘要
+python scripts/predict-sunset.py --location 杭州             # 今晚晚霞
+python scripts/predict-sunset.py --location 北京 --discord    # Discord 格式
+python scripts/predict-sunset.py --location 杭州 --short      # 一行摘要
+python scripts/predict-sunset.py --location 杭州 --serverchan # Server酱推送
 
 # 高级用法
-python predict-sunset.py --location 杭州 --type sunrise  # 朝霞
-python predict-sunset.py --location 杭州 --date 2026-05-07  # 指定日期
-python predict-sunset.py --lat 30.27 --lng 120.15     # 经纬度
-python predict-sunset.py --location 杭州 --json       # JSON 输出
-
-# 嵌入代码
-from predict_sunset import run_prediction
-result = run_prediction(location="杭州")
-print(result["quality"])           # 0.76
-print(result["discord_message"])   # 完整报告
+python scripts/predict-sunset.py --location 杭州 --type sunrise  # 朝霞
+python scripts/predict-sunset.py --location 杭州 --date 2026-05-07  # 指定日期
+python scripts/predict-sunset.py --lat 30.27 --lng 120.15     # 经纬度
+python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 ```
+
+环境变量：
+
+| 变量 | 说明 |
+|------|------|
+| `SERVERCHAN_SENDKEY` | Server酱 Turbo SendKey |
+| `SUNSET_LOCATION` | 默认城市 |
+| `SUNSETHUE_API_KEY` | 可选对照引擎 |
+| `CRON_SECRET` | Vercel 接口鉴权 |
 
 ---
 
@@ -156,15 +195,22 @@ print(result["discord_message"])   # 完整报告
 
 ```
 sunset-prediction/
-├── SKILL.md                    ← AI Agent 技能文件（Hermes/Claude 兼容）
+├── SKILL.md                    ← AI Agent 技能文件
 ├── README.md                   ← 你正在看这个
-├── requirements.txt            ← Python 依赖
+├── vercel.json                 ← Vercel Functions + 每日 Cron
+├── .env.example                ← 环境变量模板（无真实密钥）
+├── requirements.txt            ← Python 依赖（主引擎零第三方包）
 ├── LICENSE                     ← MIT
+├── api/
+│   ├── predict.py              ← GET /api/predict
+│   ├── cron.py                 ← GET /api/cron（定时推送）
+│   └── _lib.py                 ← 共享加载/鉴权逻辑
 ├── references/
 │   ├── locations.md            ← 21城坐标 + 杭州8个摄影点
-│   └── sunsethue-api.md        ← Sunsethue API 参考
+│   ├── sunsethue-api.md        ← Sunsethue API 参考
+│   └── serverchan-api.md       ← Server酱推送说明
 └── scripts/
-    └── predict-sunset.py       ← 核心脚本（双引擎，5因子模型）
+    └── predict-sunset.py       ← 核心脚本（双引擎，5因子模型 + Server酱）
 ```
 
 ---
