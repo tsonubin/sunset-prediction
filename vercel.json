@@ -1,8 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/**/*.py": {
-      "excludeFiles": "{tests/**,.git/**,**/*.md,LICENSE}"
+    "app.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{tests/**,.git/**,**/*.md,LICENSE,references/**}"
     }
   },
   "crons": [

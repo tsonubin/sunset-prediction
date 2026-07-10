@@ -1,0 +1,10 @@
+[project]
+name = "sunset-prediction"
+version = "2.0.0"
+description = "Sunset quality prediction with Server酱 push"
+requires-python = ">=3.12"
+dependencies = []
+
+# Vercel Python runtime entrypoint (WSGI `app` in app.py)
+[tool.vercel]
+entrypoint = "app:app"

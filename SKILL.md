@@ -181,11 +181,12 @@ print(result["short_summary"])    # "🔥 杭州: 76%"
 sunset-prediction/
 ├── SKILL.md                            ← 本文件（Hermes/Claude Agent 技能）
 ├── README.md                           ← GitHub 主页
-├── vercel.json                         ← Vercel Functions + 每日 Cron
+├── app.py                              ← Vercel WSGI 入口（predict + cron）
+├── pyproject.toml                      ← Vercel entrypoint
+├── vercel.json                         ← 每日 Cron
 ├── .env.example                        ← 环境变量模板
 ├── requirements.txt                    ← 依赖
 ├── LICENSE                             ← MIT
-├── api/                                ← Vercel Serverless（predict + cron）
 ├── references/
 │   ├── locations.md                    ← 21城坐标 + 杭州8个摄影点
 │   ├── serverchan-api.md               ← Server酱推送

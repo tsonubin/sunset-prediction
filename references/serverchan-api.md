@@ -65,8 +65,11 @@ python scripts/predict-sunset.py --location 杭州 --serverchan
 
 ### Vercel
 
+单一 Python 入口：`app.py` 中的 WSGI `app`（见 `pyproject.toml` → `tool.vercel.entrypoint`）。
+
 | 端点 | 作用 |
 |------|------|
+| `GET /` | 健康检查 |
 | `GET /api/predict` | 仅预测，返回 JSON |
 | `GET /api/predict?push=1` | 预测并推送（若配置了 `CRON_SECRET` 需 Bearer） |
 | `GET /api/cron` | 定时任务入口：预测 + 推送 |

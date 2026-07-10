@@ -197,14 +197,12 @@ python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 sunset-prediction/
 ├── SKILL.md                    ← AI Agent 技能文件
 ├── README.md                   ← 你正在看这个
-├── vercel.json                 ← Vercel Functions + 每日 Cron
+├── app.py                      ← Vercel WSGI 入口（/api/predict · /api/cron）
+├── pyproject.toml              ← tool.vercel.entrypoint = app:app
+├── vercel.json                 ← maxDuration + 每日 Cron
 ├── .env.example                ← 环境变量模板（无真实密钥）
 ├── requirements.txt            ← Python 依赖（主引擎零第三方包）
 ├── LICENSE                     ← MIT
-├── api/
-│   ├── predict.py              ← GET /api/predict
-│   ├── cron.py                 ← GET /api/cron（定时推送）
-│   └── _lib.py                 ← 共享加载/鉴权逻辑
 ├── references/
 │   ├── locations.md            ← 21城坐标 + 杭州8个摄影点
 │   ├── sunsethue-api.md        ← Sunsethue API 参考
