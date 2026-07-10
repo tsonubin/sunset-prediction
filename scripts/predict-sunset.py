@@ -486,19 +486,178 @@ def _est_golden_hour(sunset_time):
 
 
 def format_serverchan_title(result, location_name, date_str, event_type):
-    """Server酱标题（宜短）"""
+    """Server酱标题（宜短，列表页展示）"""
     quality = result.get("quality", 0)
     emoji = quality_emoji(quality)
     event_label = "晚霞" if event_type == "sunset" else "朝霞"
     return f"{emoji} {location_name}{event_label} {quality:.0%} · {date_str}"
 
 
+def _cloud_type_label(factors):
+    cloud_type = (factors or {}).get("cloud_type", "")
+    return {
+        "high_cloud_dominant": "高云主导（卷云/卷积云，散射最佳）",
+        "low_cloud_dominant": "低云主导（层积云，效果良好）",
+        "mixed": "混合云层",
+        "clear": "晴空（无云散射，色彩平淡）",
+        "overcast": "阴天（光线被遮挡）",
+    }.get(cloud_type, "")
+
+
 def format_serverchan_desp(result, location_name, date_str, event_type):
     """
-    Server酱正文：复用 Discord 报告，去掉粗体标记以适配部分通道。
+    Server酱正文（Markdown）。
+
+    注意：Server酱/微信端会按 Markdown 折叠单个换行，段落之间必须用空行
+    （\\n\\n），列表项用「- 」才能稳定换行显示。
     """
-    msg = format_discord_message(result, location_name, date_str, event_type)
-    return msg.replace("**", "")
+    quality = result.get("quality", 0)
+    emoji = quality_emoji(quality)
+    label = quality_label(quality)
+    source = result.get("source", "open-meteo")
+    factors = result.get("factors", {}) or {}
+
+    event_label = "晚霞" if event_type == "sunset" else "朝霞"
+    icon = "🌅" if event_type == "sunset" else "🌄"
+    src_tag = "Sunsethue" if source == "sunsethue" else "Open-Meteo"
+
+    # ── 核心评分 ──
+    blocks = [
+        f"{icon} **{location_name} {event_label}预报**",
+        f"`{date_str}`",
+        f"### {emoji} 评分 {quality:.0%}",
+        f"{label}",
+        f"来源：{src_tag}",
+    ]
+
+    # ── 关键时间 ──
+    time_lines = []
+    if source == "sunsethue":
+        sunset_t = result.get("sunset_time_local", "")
+        if sunset_t:
+            time_lines.append(f"- 🌇 日落：**{sunset_t}**")
+        magics = result.get("magics", {}) or {}
+        if magics.get("golden_hour"):
+            gh = magics["golden_hour"]
+            time_lines.append(
+                f"- ⏰ 黄金时段：{_utc_to_cst(gh[0])} — {_utc_to_cst(gh[1])}"
+            )
+        if magics.get("blue_hour"):
+            bh = magics["blue_hour"]
+            time_lines.append(
+                f"- 💙 蓝色时刻：{_utc_to_cst(bh[0])} — {_utc_to_cst(bh[1])}"
+            )
+    else:
+        sunset_t = _sunset_cst(result.get("sunset_time", ""))
+        if sunset_t and event_type == "sunset":
+            time_lines.append(f"- 🌇 日落：**{sunset_t}**")
+        gold, blue = _est_golden_hour(sunset_t or "18:40")
+        if gold:
+            time_lines.append(f"- ⏰ 黄金时段：{gold}")
+        if blue:
+            time_lines.append(f"- 💙 蓝色时刻：{blue}")
+
+    if time_lines:
+        blocks.append("### 时间")
+        blocks.append("\n".join(time_lines))
+
+    # ── 天气条件 ──
+    weather_lines = []
+    if source == "sunsethue":
+        cloud = result.get("cloud_cover")
+        if cloud is not None:
+            weather_lines.append(f"- ☁️ 云量：{cloud * 100:.0f}%")
+        if "direction" in result:
+            weather_lines.append(f"- 🧭 日落方向：{result['direction']:.0f}°")
+    else:
+        ctype = _cloud_type_label(factors)
+        if ctype:
+            weather_lines.append(f"- ☁️ 云型：{ctype}")
+
+        low_c = result.get("cloud_cover_low")
+        mid_c = result.get("cloud_cover_mid")
+        high_c = result.get("cloud_cover_high")
+        total_c = result.get("total_cloud_cover")
+        parts = []
+        if low_c is not None:
+            parts.append(f"低{low_c:.0f}%")
+        if mid_c is not None:
+            parts.append(f"中{mid_c:.0f}%")
+        if high_c is not None:
+            parts.append(f"高{high_c:.0f}%")
+        if total_c is not None:
+            parts.append(f"总{total_c:.0f}%")
+        if parts:
+            weather_lines.append(f"- ☁️ 云量：{' · '.join(parts)}")
+
+        vis = result.get("visibility_km")
+        if vis is not None:
+            vis_tag = (
+                "通透" if vis >= 20
+                else "良好" if vis >= 12
+                else "一般" if vis >= 6
+                else "雾霾"
+            )
+            weather_lines.append(f"- 👁️ 能见度：{vis:.1f} km（{vis_tag}）")
+
+        hu = result.get("humidity")
+        if hu is not None:
+            note = factors.get("humidity_note", "")
+            hu_tag = {
+                "optimal": "最佳",
+                "good": "良好",
+                "too_wet": "偏湿",
+            }.get(note, "")
+            suffix = f"（{hu_tag}）" if hu_tag else ""
+            weather_lines.append(f"- 💧 湿度：{hu:.0f}%{suffix}")
+
+        rp = result.get("rain_probability", 0) or 0
+        if rp > 0:
+            weather_lines.append(f"- 🌧️ 降水概率：{rp:.0f}%")
+
+        conf = result.get("confidence")
+        if conf is not None:
+            conf_tag = "高" if conf >= 0.85 else "中" if conf >= 0.65 else "低"
+            weather_lines.append(f"- 🎯 置信度：{conf:.0%}（{conf_tag}）")
+
+    if weather_lines:
+        blocks.append("### 天气")
+        blocks.append("\n".join(weather_lines))
+
+    # ── 拍摄建议 ──
+    if quality >= 0.75:
+        tips = [
+            "🔥 今晚必出！提前 1 小时到场踩光",
+            "穿暖色系（橙 / 红 / 黄）更融晚霞",
+            "带反光板 / 补光灯补面光",
+            "三脚架必备（蓝调时刻光线暗）",
+        ]
+    elif quality >= 0.50:
+        tips = [
+            "值得出工，提前 30 分钟到场",
+            "日落方向找开阔地",
+            "建议带反光板",
+        ]
+    else:
+        tips = [
+            "建议改天，或改拍室内 / 夜景",
+            "若仍出门，后期可多拉饱和度 + 暖色调",
+        ]
+
+    blocks.append("### 📸 拍摄建议")
+    blocks.append("\n".join(f"- {t}" for t in tips))
+
+    # ── 杭州机位 ──
+    if location_name == "杭州" and quality >= 0.25:
+        limit = 3 if quality < 0.50 else 5
+        spot_lines = [f"- **{spot}** — {desc}" for spot, desc in HANGZHOU_SPOTS[:limit]]
+        blocks.append("### 📍 推荐机位")
+        blocks.append("\n".join(spot_lines))
+
+    blocks.append(f"_预报更新 {datetime.now(TZ_CST).strftime('%H:%M')}_")
+
+    # 段落之间空行 → Server酱 Markdown 才不会挤成一坨
+    return "\n\n".join(blocks)
 
 
 def format_discord_message(result, location_name, date_str, event_type):
