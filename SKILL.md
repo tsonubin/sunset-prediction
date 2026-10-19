@@ -119,7 +119,7 @@ triggers:
 python3 predict-sunset.py --location 杭州 --discord     # 今晚晚霞
 python3 predict-sunset.py --location 北京 --discord      # 北京也行
 python3 predict-sunset.py --location 杭州 --type sunrise # 朝霞
-python3 predict-sunset.py --location 杭州 --date 2026-05-07  # 明天
+python3 predict-sunset.py --location 杭州 --date 2026-05-07  # 明天（预报窗口：今天~后天）
 python3 predict-sunset.py --location 杭州 --short        # 一行摘要
 python3 predict-sunset.py --lat 30.27 --lng 120.15       # 精确坐标
 ```
@@ -135,8 +135,12 @@ python3 scripts/predict-sunset.py --location 杭州 --serverchan
 
 ### 嵌入代码
 ```python
-from predict_sunset import run_prediction
-result = run_prediction(location="杭州")
+import importlib.util
+spec = importlib.util.spec_from_file_location("predict_sunset", "scripts/predict-sunset.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+result = mod.run_prediction(location="杭州")
 print(result["discord_message"])  # 完整报告
 print(result["quality"])          # 0.76
 print(result["short_summary"])    # "🔥 杭州: 76%"
@@ -187,6 +191,9 @@ sunset-prediction/
 ├── .env.example                        ← 环境变量模板
 ├── requirements.txt                    ← 依赖
 ├── LICENSE                             ← MIT
+├── docs/
+│   └── AUDIT-2026-10-19.md           ← 审计记录（发现 + 设计决策）
+├── tests/                            ← 定向回归测试（stdlib unittest）
 ├── references/
 │   ├── locations.md                    ← 21城坐标 + 杭州8个摄影点
 │   ├── serverchan-api.md               ← Server酱推送
@@ -200,7 +207,8 @@ sunset-prediction/
 ## ℹ️ 注意事项
 
 - 主引擎 **Open-Meteo 完全免费**，无需 key，没有额度限制
-- Sunsethue 为可选辅助引擎，免费注册：https://sunsethue.com
+- Sunsethue 为可选辅助引擎，免费注册：https://sunsethue.com；key 通过 `X-API-Key` 头传输，不会出现在 URL 里
+- `--date` 预报窗口为**今天~后天**；未知城市名、非法/越界经纬度、非法日期会明确报错（CLI 退出 1 / HTTP 400），不静默回退杭州
 - 晚霞预报本质是概率性的，GFS 模型 >48h 不可靠
 - 输出含 **置信度指标**（🟢高/🟡中/🔴低），帮助你判断可信度
 

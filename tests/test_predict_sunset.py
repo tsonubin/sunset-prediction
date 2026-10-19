@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import unittest
+import urllib.request
 from datetime import datetime, timedelta
 from unittest import mock
 
@@ -181,6 +182,47 @@ class ResolveLocationTest(unittest.TestCase):
             self.assertEqual(
                 mod.resolve_location(None, 22.5, 114.0), (22.5, 114.0, "(22.5,114.0)")
             )
+
+
+class SunsethueRequestTest(unittest.TestCase):
+    """Security contract: the API key travels in a header, never in the URL."""
+
+    def test_api_key_sent_as_header_not_query(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            raise RuntimeError("stop")
+
+        with mock.patch.dict(os.environ, {"SUNSETHUE_API_KEY": "sekret-key"}), \
+                mock.patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            mod.predict_sunsethue(30.27, 120.15, "2026-10-19")
+
+        self.assertNotIn("sekret-key", captured["url"])
+        self.assertNotIn("key=", captured["url"])
+        self.assertEqual(captured["headers"].get("x-api-key"), "sekret-key")
+
+
+class SparseSunsethuePayloadTest(unittest.TestCase):
+    """Null/short Sunsethue fields must not crash message formatting."""
+
+    def test_formatters_tolerate_sparse_payload(self):
+        payloads = [
+            {"quality": 0.42, "source": "sunsethue",
+             "cloud_cover": None, "direction": None, "magics": None},
+            {"quality": 0.42, "source": "sunsethue",
+             "cloud_cover": None, "direction": None,
+             "magics": {"golden_hour": ["17:17"], "blue_hour": None}},
+        ]
+        for raw in payloads:
+            with self.subTest(raw=raw):
+                for msg in (
+                    mod.format_serverchan_desp(raw, "杭州", "2026-10-19", "sunset"),
+                    mod.format_discord_message(raw, "杭州", "2026-10-19", "sunset"),
+                ):
+                    self.assertIn("杭州", msg)
+                    self.assertNotIn("None", msg)
 
 
 if __name__ == "__main__":

@@ -109,12 +109,14 @@ python predict-sunset.py --location 杭州 --date 2026-05-07
 
 ### 🎬 旅拍规划
 ```bash
-# 下周末去北京故宫怎么样？
-python predict-sunset.py --location 北京 --date 2026-05-13
+# 明天去北京故宫怎么样？
+python predict-sunset.py --location 北京 --date 2026-05-07
 
 # 🌥️ 评分：35% — 一般
-# 下周末北京晚霞一般，建议改期
+# 明天北京晚霞一般，建议改期
 ```
+
+> 📅 预报窗口为**今天 ~ 后天**（Open-Meteo 3 天预报）；更远或过去的日期会明确报错，不会拿别的日子的数据糊弄。
 
 ### 🤖 自动推送（Server酱 → 微信）
 ```
@@ -175,7 +177,7 @@ python scripts/predict-sunset.py --location 杭州 --serverchan # Server酱推�
 
 # 高级用法
 python scripts/predict-sunset.py --location 杭州 --type sunrise  # 朝霞
-python scripts/predict-sunset.py --location 杭州 --date 2026-05-07  # 指定日期
+python scripts/predict-sunset.py --location 杭州 --date 2026-05-07  # 指定日期（今天~后天）
 python scripts/predict-sunset.py --lat 30.27 --lng 120.15     # 经纬度
 python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 ```
@@ -188,6 +190,15 @@ python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 | `SUNSET_LOCATION` | 默认城市 |
 | `SUNSETHUE_API_KEY` | 可选对照引擎 |
 | `CRON_SECRET` | Vercel 接口鉴权 |
+
+输入非法时**明确报错**，不静默回退：未知城市名、缺失/越界经纬度、非法日期、超出预报窗口
+（今天~后天）的日期 → CLI 打印 ❌ 并退出 1，HTTP `/api/predict` 返回 `400 Bad Request`。
+
+#### 运行测试
+
+```bash
+python3 -m unittest discover -s tests -t .   # 定向回归测试，秒级
+```
 
 ---
 
@@ -203,6 +214,9 @@ sunset-prediction/
 ├── .env.example                ← 环境变量模板（无真实密钥）
 ├── requirements.txt            ← Python 依赖（主引擎零第三方包）
 ├── LICENSE                     ← MIT
+├── docs/
+│   └── AUDIT-2026-10-19.md       ← 审计记录（发现 + 设计决策）
+├── tests/                        ← 定向回归测试（stdlib unittest）
 ├── references/
 │   ├── locations.md            ← 21城坐标 + 杭州8个摄影点
 │   ├── sunsethue-api.md        ← Sunsethue API 参考
