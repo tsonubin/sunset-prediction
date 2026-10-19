@@ -250,7 +250,8 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
     event_time_str = _day_value(daily, time_key, day_index)
     date_str = _day_value(daily, "time", day_index)
 
-    event_hour = 18
+    # 事件时间缺失/不可解析时的兜底小时：日落 18 点，日出 6 点（勿再退到傍晚窗口）
+    event_hour = 18 if event_type == "sunset" else 6
     if event_time_str and "T" in event_time_str:
         try:
             event_hour = int(event_time_str.split("T")[1].split(":")[0])
@@ -445,6 +446,7 @@ def resolve_location(location=None, lat=None, lng=None):
             raise ValueError(f"coordinates out of range: ({lat}, {lng})")
         return lat, lng, f"({lat},{lng})"
 
+    location = (location or "").strip()
     if location:
         loc = LOCATION_MAP.get(location)
         if loc is None:
@@ -454,7 +456,7 @@ def resolve_location(location=None, lat=None, lng=None):
             )
         return loc[0], loc[1], location
 
-    env_loc = os.environ.get("SUNSET_LOCATION", "")
+    env_loc = os.environ.get("SUNSET_LOCATION", "").strip()
     if env_loc:
         loc = LOCATION_MAP.get(env_loc)
         if loc is None:

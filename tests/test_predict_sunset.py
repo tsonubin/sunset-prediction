@@ -56,6 +56,17 @@ def _no_network():
     return mock.Mock(side_effect=AssertionError("engine must not be called"))
 
 
+def _morning_overcast(h):
+    """Overcast morning (0-8h), clear afternoon — reveals which window got sampled."""
+    if h <= 8:
+        return dict(cloud_cover_low=90, cloud_cover_mid=20, cloud_cover_high=10,
+                    cloud_cover=90, visibility=5000, relative_humidity_2m=80,
+                    precipitation_probability=10)
+    return dict(cloud_cover_low=5, cloud_cover_mid=5, cloud_cover_high=5,
+                cloud_cover=5, visibility=20000, relative_humidity_2m=50,
+                precipitation_probability=10)
+
+
 class DateWindowTest(unittest.TestCase):
     """F1: the requested date must select that date's forecast slice."""
 
@@ -105,24 +116,27 @@ class DateWindowTest(unittest.TestCase):
 class SunriseSamplingTest(unittest.TestCase):
     """F2: sunrise quality must come from morning hours, not the sunset window."""
 
+    def setUp(self):
+        self.today = datetime.now(mod.TZ_CST).date()
+        self.dates = [
+            (self.today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)
+        ]
+
     def test_sunrise_scores_morning_data(self):
-        def profile(h):
-            if h <= 8:  # overcast morning
-                return dict(cloud_cover_low=90, cloud_cover_mid=20,
-                            cloud_cover_high=10, cloud_cover=90,
-                            visibility=5000, relative_humidity_2m=80,
-                            precipitation_probability=10)
-            return dict(cloud_cover_low=5, cloud_cover_mid=5,
-                        cloud_cover_high=5, cloud_cover=5,
-                        visibility=20000, relative_humidity_2m=50,
-                        precipitation_probability=10)
-
-        today = datetime.now(mod.TZ_CST).date()
-        dates = [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
-        meteo = _meteo(dates, ["17:30"] * 3, ["05:30"] * 3, profile)
-
+        meteo = _meteo(self.dates, ["17:30"] * 3, ["05:30"] * 3, _morning_overcast)
         result = mod.compute_sunset_quality(meteo, day_index=0, event_type="sunrise")
         self.assertEqual(result["factors"]["cloud_type"], "overcast")
+
+    def test_sunrise_falls_back_to_morning_hour_when_event_time_unusable(self):
+        for label, drop_key in (("unparseable", False), ("missing", True)):
+            with self.subTest(case=label):
+                meteo = _meteo(self.dates, ["17:30"] * 3, [None] * 3, _morning_overcast)
+                if drop_key:
+                    del meteo["daily"]["sunrise"]
+                result = mod.compute_sunset_quality(
+                    meteo, day_index=0, event_type="sunrise"
+                )
+                self.assertEqual(result["factors"]["cloud_type"], "overcast")
 
 
 class ZeroValueTest(unittest.TestCase):
@@ -173,6 +187,11 @@ class ResolveLocationTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SUNSET_LOCATION": "Nowhere"}):
             with self.assertRaises(ValueError):
                 mod.resolve_location()
+
+    def test_whitespace_in_location_tolerated(self):
+        with mock.patch.dict(os.environ, {"SUNSET_LOCATION": "杭州\n"}):
+            self.assertEqual(mod.resolve_location(), (30.2741, 120.1551, "杭州"))
+        self.assertEqual(mod.resolve_location(" 杭州 "), (30.2741, 120.1551, "杭州"))
 
     def test_defaults_and_mapped_cities_unchanged(self):
         with mock.patch.dict(os.environ):
