@@ -13,6 +13,7 @@ Routes:
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
@@ -61,7 +62,7 @@ def _check_bearer(environ: dict) -> tuple[bool, str | None]:
     secret = os.environ.get("CRON_SECRET", "").strip()
     if not secret:
         return True, None
-    if _auth_header(environ) == f"Bearer {secret}":
+    if hmac.compare_digest(_auth_header(environ), f"Bearer {secret}"):
         return True, None
     return False, "Unauthorized: missing or invalid Authorization Bearer token"
 
@@ -69,8 +70,8 @@ def _check_bearer(environ: dict) -> tuple[bool, str | None]:
 def _run_and_maybe_push(
     *,
     location: str | None = None,
-    lat: float | None = None,
-    lng: float | None = None,
+    lat: float | str | None = None,
+    lng: float | str | None = None,
     date_str: str | None = None,
     event_type: str = "sunset",
     push: bool = True,
@@ -143,11 +144,6 @@ def _handle_predict(environ: dict) -> tuple[int, list[tuple[str, str]], bytes]:
     event_type = q.get("type") or "sunset"
     push = str(q.get("push", "0")).lower() in {"1", "true", "yes", "on"}
 
-    lat = q.get("lat")
-    lng = q.get("lng")
-    lat_f = float(lat) if lat not in (None, "") else None
-    lng_f = float(lng) if lng not in (None, "") else None
-
     if push:
         ok, err = _check_bearer(environ)
         if not ok:
@@ -156,12 +152,14 @@ def _handle_predict(environ: dict) -> tuple[int, list[tuple[str, str]], bytes]:
     try:
         result = _run_and_maybe_push(
             location=location,
-            lat=lat_f,
-            lng=lng_f,
+            lat=q.get("lat") or None,
+            lng=q.get("lng") or None,
             date_str=date_str,
             event_type=event_type,
             push=push,
         )
+    except ValueError as e:
+        return _json(400, {"ok": False, "error": str(e)})
     except Exception as e:
         return _json(500, {"ok": False, "error": str(e)})
 
@@ -196,6 +194,8 @@ def _handle_cron(environ: dict) -> tuple[int, list[tuple[str, str]], bytes]:
             event_type=event_type,
             push=True,
         )
+    except ValueError as e:
+        return _json(400, {"ok": False, "error": str(e)})
     except Exception as e:
         return _json(500, {"ok": False, "error": str(e)})
 
@@ -232,6 +232,7 @@ def app(environ: dict, start_response: Callable) -> list[bytes]:
 
     reason = {
         200: "OK",
+        400: "Bad Request",
         401: "Unauthorized",
         404: "Not Found",
         405: "Method Not Allowed",

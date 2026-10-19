@@ -70,6 +70,9 @@ HANGZHOU_SPOTS = [
 
 TZ_CST = timezone(timedelta(hours=8), "Asia/Shanghai")
 
+# Open-Meteo 预报窗口（天），与 fetch_openmeteo 的 forecast_days 保持一致
+FORECAST_DAYS = 3
+
 
 # ── 工具函数 ─────────────────────────────────────────────────
 
@@ -158,21 +161,23 @@ def send_serverchan(title, desp="", sendkey=None, short=None):
     return result
 
 
-def _hour_index_for_date(hourly_times, target_date, sunset_hour=18):
+def _hour_index_for_date(hourly_times, target_date, event_hour=18):
     """
-    找到 target_date 当天 sunset_hour 点在 hourly 数组中的索引。
-    如果 sunset_hour 不在，找最接近的下午时段（16-19 点）。
+    找到 target_date 当天事件时点（event_hour）在 hourly 数组中的索引。
+    候选窗口为事件前 2 小时到事件后 1 小时，取最接近事件时点的小时；
+    日落 ~18 点即原 16-19 点窗口，日出则落在清晨。
     """
     target_prefix = target_date + "T"
+    lo, hi = event_hour - 2, event_hour + 1
     candidates = []
     for i, t in enumerate(hourly_times):
         if t.startswith(target_prefix):
             h = int(t.split("T")[1].split(":")[0])
-            if 16 <= h <= 19:
-                candidates.append((abs(h - sunset_hour), i, h))
+            if lo <= h <= hi:
+                candidates.append((abs(h - event_hour), i, h))
     if candidates:
         candidates.sort()
-        return candidates[0][1]  # 最接近日落的小时索引
+        return candidates[0][1]  # 最接近事件时点的小时索引
     return None
 
 
@@ -207,7 +212,7 @@ def fetch_openmeteo(lat, lng):
                   "cloud_cover,visibility,"
                   "relative_humidity_2m,precipitation_probability",
         "timezone": "Asia/Shanghai",
-        "forecast_days": 3,
+        "forecast_days": FORECAST_DAYS,
     })
     url = f"https://api.open-meteo.com/v1/forecast?{params}"
     return _http_get(url)
@@ -246,9 +251,9 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
     idx = _hour_index_for_date(hourly_times, date_str, event_hour)
 
     if idx is None:
-        return {"error": f"找不到 {date_str} 日落时段的小时数据"}
+        return {"error": f"找不到 {date_str} 对应时段的小时数据"}
 
-    # 取日落前后 3h 窗口
+    # 取事件前 1h ~ 后 2h 窗口
     start_idx = max(0, idx - 1)
     end_idx = min(len(hourly_times), idx + 3)
 
@@ -262,7 +267,7 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
     total_cloud = safe_avg("cloud_cover")
     humidity = safe_avg("relative_humidity_2m")
     visibility = safe_avg("visibility")
-    vis_km = visibility / 1000 if visibility else None
+    vis_km = visibility / 1000 if visibility is not None else None
 
     # ════════════════════════════════════════════
     # ⭐ v2.0 多因子评分模型
@@ -398,13 +403,13 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
         "quality": score,
         "source": "open-meteo",
         "confidence": round(confidence, 2),
-        "cloud_cover_low": round(low_cloud, 0) if low_cloud else None,
-        "cloud_cover_mid": round(mid_cloud, 0) if mid_cloud else None,
-        "cloud_cover_high": round(high_cloud, 0) if high_cloud else None,
-        "total_cloud_cover": round(total_cloud, 0) if total_cloud else None,
-        "visibility_km": round(vis_km, 1) if vis_km else None,
+        "cloud_cover_low": round(low_cloud, 0) if low_cloud is not None else None,
+        "cloud_cover_mid": round(mid_cloud, 0) if mid_cloud is not None else None,
+        "cloud_cover_high": round(high_cloud, 0) if high_cloud is not None else None,
+        "total_cloud_cover": round(total_cloud, 0) if total_cloud is not None else None,
+        "visibility_km": round(vis_km, 1) if vis_km is not None else None,
         "rain_probability": round(rain_prob, 0),
-        "humidity": round(humidity, 0) if humidity else None,
+        "humidity": round(humidity, 0) if humidity is not None else None,
         "sunset_time": sunset_time,
         "sunrise_time": sunrise_time,
         "factors": factors,
@@ -414,22 +419,54 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
 # ── 位置解析 ────────────────────────────────────────────────
 
 def resolve_location(location=None, lat=None, lng=None):
-    """级联位置解析：手动坐标 > 城市名 > 环境变量 > 默认杭州"""
-    if lat is not None and lng is not None:
-        return float(lat), float(lng), f"({lat},{lng})"
+    """
+    级联位置解析：手动坐标 > 城市名 > 环境变量 > 默认杭州。
+    显式输入非法（未知城市、坐标缺失/越界）时抛 ValueError，不静默回退。
+    """
+    if (lat is None) != (lng is None):
+        raise ValueError("lat and lng must be provided together")
+    if lat is not None:
+        try:
+            lat, lng = float(lat), float(lng)
+        except (TypeError, ValueError):
+            raise ValueError(f"lat/lng must be numeric, got ({lat!r}, {lng!r})") from None
+        if not -90 <= lat <= 90 or not -180 <= lng <= 180:
+            raise ValueError(f"coordinates out of range: ({lat}, {lng})")
+        return lat, lng, f"({lat},{lng})"
 
     if location:
         loc = LOCATION_MAP.get(location)
-        if loc:
-            return loc[0], loc[1], location
+        if loc is None:
+            raise ValueError(f"unknown location {location!r}; pass a mapped city or lat/lng")
+        return loc[0], loc[1], location
 
     env_loc = os.environ.get("SUNSET_LOCATION", "")
     if env_loc:
         loc = LOCATION_MAP.get(env_loc)
-        if loc:
-            return loc[0], loc[1], env_loc
+        if loc is None:
+            raise ValueError(f"SUNSET_LOCATION {env_loc!r} is not a mapped city")
+        return loc[0], loc[1], env_loc
 
     return 30.2741, 120.1551, "杭州"
+
+
+def _resolve_date(date_str):
+    """
+    校验预测日期，返回 (date_str, day_index)。
+    Open-Meteo 只提供今天起 FORECAST_DAYS 天的预报，过去的/超窗的日期抛 ValueError。
+    """
+    today = datetime.now(TZ_CST).date()
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid date {date_str!r}, expected YYYY-MM-DD") from None
+    offset = (day - today).days
+    if not 0 <= offset < FORECAST_DAYS:
+        end = (today + timedelta(days=FORECAST_DAYS - 1)).strftime("%Y-%m-%d")
+        raise ValueError(
+            f"date {date_str} outside forecast window {today.strftime('%Y-%m-%d')}..{end}"
+        )
+    return date_str, offset
 
 
 # ── 格式化输出 ──────────────────────────────────────────────
@@ -802,21 +839,26 @@ def run_prediction(location=None, lat=None, lng=None,
     """
     执行日落/日出质量预测。
     返回 dict { quality, source, discord_message, short_summary, ... }
+    输入非法（日期格式/范围、未知位置、事件类型）时抛 ValueError。
     """
     resolved_lat, resolved_lng, location_name = resolve_location(location, lat, lng)
 
-    if not date_str:
-        date_str = datetime.now(TZ_CST).strftime("%Y-%m-%d")
+    if event_type not in ("sunset", "sunrise"):
+        raise ValueError(f"invalid type {event_type!r}, expected sunset or sunrise")
 
-    today_str = datetime.now(TZ_CST).strftime("%Y-%m-%d")
-    day_index = 0 if date_str == today_str else 1
+    if date_str:
+        date_str, day_index = _resolve_date(date_str)
+    else:
+        date_str = datetime.now(TZ_CST).strftime("%Y-%m-%d")
+        day_index = 0
 
     # ── 引擎 1：尝试 Sunsethue ──
     result = predict_sunsethue(resolved_lat, resolved_lng, date_str, event_type)
-    if result and "error" not in result:
-        data = result.get("data", {})
+    data = (result or {}).get("data") or {}
+    quality = data.get("quality")
+    if result and "error" not in result and isinstance(quality, (int, float)):
         raw = {
-            "quality": data.get("quality", 0.5),
+            "quality": max(0.0, min(1.0, float(quality))),
             "cloud_cover": data.get("cloud_cover"),
             "direction": data.get("direction"),
             "magics": data.get("magics", {}),
@@ -831,7 +873,7 @@ def run_prediction(location=None, lat=None, lng=None,
             except Exception:
                 pass
     else:
-        # ── 引擎 2：Open-Meteo 兜底 ──
+        # ── 引擎 2：Open-Meteo 兜底（引擎 1 未配置/失败/响应缺 quality 时） ──
         meteo = fetch_openmeteo(resolved_lat, resolved_lng)
         if "_error" in meteo:
             return {"error": f"Open-Meteo 请求失败: {meteo['_error']}", "source": "failed"}
@@ -878,10 +920,14 @@ def main():
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
-    result = run_prediction(
-        location=args.location, lat=args.lat, lng=args.lng,
-        date_str=args.date, event_type=args.event_type,
-    )
+    try:
+        result = run_prediction(
+            location=args.location, lat=args.lat, lng=args.lng,
+            date_str=args.date, event_type=args.event_type,
+        )
+    except ValueError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
 
     if "error" in result:
         print(f"❌ {result['error']}")
