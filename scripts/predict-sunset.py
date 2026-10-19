@@ -472,6 +472,7 @@ def _resolve_date(date_str):
     Open-Meteo 只提供今天起 FORECAST_DAYS 天的预报，过去的/超窗的日期抛 ValueError。
     """
     today = datetime.now(TZ_CST).date()
+    date_str = str(date_str or "").strip()
     try:
         day = datetime.strptime(date_str, "%Y-%m-%d").date()
     except (TypeError, ValueError):
@@ -857,6 +858,7 @@ def run_prediction(location=None, lat=None, lng=None,
     """
     resolved_lat, resolved_lng, location_name = resolve_location(location, lat, lng)
 
+    event_type = str(event_type or "").strip().lower()
     if event_type not in ("sunset", "sunrise"):
         raise ValueError(f"invalid type {event_type!r}, expected sunset or sunrise")
 
@@ -919,6 +921,15 @@ def run_prediction(location=None, lat=None, lng=None,
 
 # ── CLI 入口 ────────────────────────────────────────────────
 
+def _fail(message, as_json):
+    """错误输出：--json 给机器可读 JSON（stdout），否则给人类可读一行。"""
+    if as_json:
+        print(json.dumps({"ok": False, "error": message}, ensure_ascii=False))
+    else:
+        print(f"❌ {message}")
+    sys.exit(1)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="🌅 晚霞/朝霞预测")
@@ -926,7 +937,8 @@ def main():
     parser.add_argument("--lat", type=float, default=None)
     parser.add_argument("--lng", type=float, default=None)
     parser.add_argument("--date", type=str, default=None)
-    parser.add_argument("--type", dest="event_type", type=str,
+    parser.add_argument("--type", dest="event_type",
+                        type=lambda s: s.strip().lower(),
                         default="sunset", choices=["sunset", "sunrise"])
     parser.add_argument("--discord", action="store_true",
                         help="输出 Discord/可读报告格式（默认）")
@@ -942,12 +954,10 @@ def main():
             date_str=args.date, event_type=args.event_type,
         )
     except ValueError as e:
-        print(f"❌ {e}")
-        sys.exit(1)
+        _fail(str(e), args.json)
 
     if "error" in result:
-        print(f"❌ {result['error']}")
-        sys.exit(1)
+        _fail(result["error"], args.json)
 
     push_result = None
     if args.serverchan:

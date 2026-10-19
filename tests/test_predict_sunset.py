@@ -7,7 +7,11 @@ owning boundary: run_prediction (date handling), compute_sunset_quality
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
+import sys
 import unittest
 import urllib.request
 from datetime import datetime, timedelta
@@ -67,14 +71,21 @@ def _morning_overcast(h):
                 precipitation_probability=10)
 
 
+def _dates3():
+    today = datetime.now(mod.TZ_CST).date()
+    return [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
+
+
 class DateWindowTest(unittest.TestCase):
     """F1: the requested date must select that date's forecast slice."""
 
     def setUp(self):
         self.today = datetime.now(mod.TZ_CST).date()
-        self.dates = [
-            (self.today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)
-        ]
+        self.dates = _dates3()
+
+    def test_date_whitespace_trimmed(self):
+        date_str, day_index = mod._resolve_date(f" {self.dates[1]} ")
+        self.assertEqual((date_str, day_index), (self.dates[1], 1))
 
     def test_requested_date_uses_that_days_data(self):
         meteo = _meteo(
@@ -117,10 +128,7 @@ class SunriseSamplingTest(unittest.TestCase):
     """F2: sunrise quality must come from morning hours, not the sunset window."""
 
     def setUp(self):
-        self.today = datetime.now(mod.TZ_CST).date()
-        self.dates = [
-            (self.today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)
-        ]
+        self.dates = _dates3()
 
     def test_sunrise_scores_morning_data(self):
         meteo = _meteo(self.dates, ["17:30"] * 3, ["05:30"] * 3, _morning_overcast)
@@ -139,14 +147,31 @@ class SunriseSamplingTest(unittest.TestCase):
                 self.assertEqual(result["factors"]["cloud_type"], "overcast")
 
 
+class InputNormalizationTest(unittest.TestCase):
+    """event_type accepts case/whitespace variants; junk is still rejected."""
+
+    def test_event_type_normalized_and_junk_rejected(self):
+        meteo = _meteo(
+            _dates3(), ["17:30"] * 3, ["05:30"] * 3,
+            _flat(cloud_cover_low=10, cloud_cover_mid=20, cloud_cover_high=50,
+                  cloud_cover=30, visibility=15000, relative_humidity_2m=55,
+                  precipitation_probability=10),
+        )
+        with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
+                mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
+            result = mod.run_prediction(location="杭州", event_type=" SUNRISE ")
+        self.assertEqual(result["event_type"], "sunrise")
+
+        with self.assertRaises(ValueError):
+            mod.run_prediction(location="杭州", event_type="banana")
+
+
 class ZeroValueTest(unittest.TestCase):
     """F3: a real 0 (clear-sky cloud cover) must survive into the output."""
 
     def test_zero_cloud_cover_is_not_dropped(self):
-        today = datetime.now(mod.TZ_CST).date()
-        dates = [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
         meteo = _meteo(
-            dates,
+            _dates3(),
             ["17:30"] * 3,
             ["06:30"] * 3,
             _flat(
@@ -242,6 +267,20 @@ class SparseSunsethuePayloadTest(unittest.TestCase):
                 ):
                     self.assertIn("杭州", msg)
                     self.assertNotIn("None", msg)
+
+
+class JsonCliTest(unittest.TestCase):
+    """--json consumers get JSON errors, not human text."""
+
+    def test_json_error_output(self):
+        buf = io.StringIO()
+        with mock.patch.object(mod, "run_prediction", return_value={"error": "boom"}), \
+                mock.patch.object(sys, "argv", ["predict-sunset.py", "--json"]), \
+                contextlib.redirect_stdout(buf), \
+                self.assertRaises(SystemExit) as cm:
+            mod.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(json.loads(buf.getvalue()), {"ok": False, "error": "boom"})
 
 
 if __name__ == "__main__":

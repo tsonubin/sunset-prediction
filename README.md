@@ -196,6 +196,8 @@ python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 
 输入非法时**明确报错**，不静默回退：未知城市名、缺失/越界经纬度、非法日期、超出预报窗口
 （今天~后天）的日期 → CLI 打印 ❌ 并退出 1，HTTP `/api/predict` 返回 `400 Bad Request`。
+日期与 `--type` 的首尾空格/大小写会被自动规范化（如 `" 2026-05-07 "`、`Sunrise`）。
+`--json` 模式下错误也输出 JSON（`{"ok": false, "error": …}`），方便机器消费。
 
 #### 运行测试
 
