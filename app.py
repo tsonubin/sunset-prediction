@@ -59,9 +59,13 @@ def _user_agent(environ: dict) -> str:
 
 
 def _check_bearer(environ: dict) -> tuple[bool, str | None]:
+    """推送鉴权：CRON_SECRET 必须配置，未配置即拒绝（禁止匿名触发推送）。"""
     secret = os.environ.get("CRON_SECRET", "").strip()
     if not secret:
-        return True, None
+        return False, (
+            "Unauthorized: push requires CRON_SECRET; set it and pass "
+            "Authorization: Bearer <CRON_SECRET>"
+        )
     if hmac.compare_digest(_auth_header(environ), f"Bearer {secret}"):
         return True, None
     return False, "Unauthorized: missing or invalid Authorization Bearer token"

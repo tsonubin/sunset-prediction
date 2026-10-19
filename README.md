@@ -70,7 +70,7 @@ python scripts/predict-sunset.py --location 杭州 --serverchan
 |------|------|------|
 | `SERVERCHAN_SENDKEY` | ✅ 推送时 | Server酱 SendKey（`SCT…`） |
 | `SUNSET_LOCATION` | 否 | 默认城市，如 `杭州` |
-| `CRON_SECRET` | 建议 | 保护 `/api/cron` 与 `?push=1` |
+| `CRON_SECRET` | ✅ 推送时 | `?push=1` 必需；同时保护 `/api/cron` |
 
 3. Deploy 后每天 **16:00（北京时间）** 自动跑 `/api/cron` 并推送  
    （`vercel.json` 中 schedule 为 `0 8 * * *` UTC）
@@ -81,10 +81,13 @@ python scripts/predict-sunset.py --location 杭州 --serverchan
 # 仅预测
 curl "https://your-app.vercel.app/api/predict?location=杭州"
 
-# 预测并推送（若设置了 CRON_SECRET）
+# 预测并推送（必须设置 CRON_SECRET，否则 401）
 curl -H "Authorization: Bearer $CRON_SECRET" \
   "https://your-app.vercel.app/api/predict?location=杭州&push=1"
 ```
+
+> 🔒 推送不可匿名触发：未设置 `CRON_SECRET` 时 `?push=1` 直接返回 401（防止被人刷推送/薅额度）。
+> `/api/cron` 在未设置时仍接受 Vercel 平台的 Cron 调用。
 
 ### 5. 本地 crontab（可选，不用 Vercel 时）
 
