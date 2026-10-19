@@ -874,6 +874,7 @@ def run_prediction(location=None, lat=None, lng=None,
     result = predict_sunsethue(resolved_lat, resolved_lng, date_str, event_type)
     data = (result or {}).get("data") or {}
     quality = data.get("quality")
+    engine_note = None
     if result and "error" not in result and isinstance(quality, (int, float)):
         raw = {
             "quality": max(0.0, min(1.0, float(quality))),
@@ -892,6 +893,13 @@ def run_prediction(location=None, lat=None, lng=None,
                 pass
     else:
         # ── 引擎 2：Open-Meteo 兜底（引擎 1 未配置/失败/响应缺 quality 时） ──
+        if result is not None:
+            # key 已配置、请求已发出但未被采用 → 留下可诊断的回退原因
+            engine_note = (
+                f"engine1(sunsethue) failed: {result['error']}; fell back to open-meteo"
+                if "error" in result
+                else "engine1(sunsethue) returned no data.quality; fell back to open-meteo"
+            )
         meteo = fetch_openmeteo(resolved_lat, resolved_lng)
         if "_error" in meteo:
             return {"error": f"Open-Meteo 请求失败: {meteo['_error']}", "source": "failed"}
@@ -907,7 +915,7 @@ def run_prediction(location=None, lat=None, lng=None,
     sc_title = format_serverchan_title(raw, location_name, date_str, event_type)
     sc_desp = format_serverchan_desp(raw, location_name, date_str, event_type)
 
-    return {
+    out = {
         "quality": raw["quality"],
         "source": raw["source"],
         "location": location_name,
@@ -919,6 +927,9 @@ def run_prediction(location=None, lat=None, lng=None,
         "serverchan_title": sc_title,
         "serverchan_desp": sc_desp,
     }
+    if engine_note:
+        out["engine_note"] = engine_note
+    return out
 
 
 # ── CLI 入口 ────────────────────────────────────────────────
@@ -985,6 +996,8 @@ def main():
             "date": result["date"],
             "short": result["short_summary"],
         }
+        if "engine_note" in result:
+            payload["engine_note"] = result["engine_note"]
         if push_result is not None:
             payload["serverchan"] = push_result
         print(json.dumps(payload, ensure_ascii=False, indent=2))

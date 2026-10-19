@@ -102,6 +102,8 @@ def _run_and_maybe_push(
         "message": result["discord_message"],
         "serverchan_title": result["serverchan_title"],
     }
+    if "engine_note" in result:
+        out["engine_note"] = result["engine_note"]
 
     if push:
         push_result = mod.send_serverchan(

@@ -191,7 +191,7 @@ python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 |------|------|
 | `SERVERCHAN_SENDKEY` | Server酱 Turbo SendKey |
 | `SUNSET_LOCATION` | 默认城市 |
-| `SUNSETHUE_API_KEY` | 可选对照引擎 |
+| `SUNSETHUE_API_KEY` | 可选对照引擎（失败/响应异常时自动回退 Open-Meteo，`--json` 与 API 响应会带 `engine_note` 说明原因） |
 | `CRON_SECRET` | Vercel 接口鉴权 |
 
 输入非法时**明确报错**，不静默回退：未知城市名、缺失/越界经纬度、非法日期、超出预报窗口

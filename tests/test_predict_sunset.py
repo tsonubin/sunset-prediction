@@ -296,5 +296,36 @@ class JsonCliTest(unittest.TestCase):
         self.assertEqual(json.loads(buf.getvalue()), {"ok": False, "error": "boom"})
 
 
+class EngineFallbackNoteTest(unittest.TestCase):
+    """When engine 1 is attempted but unusable, the fallback must be explainable."""
+
+    def test_note_present_on_engine1_failure(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        cases = [
+            {"error": "HTTP 401: Unauthorized", "source": "sunsethue"},
+            {"data": {}},
+        ]
+        for engine1 in cases:
+            with self.subTest(engine1=engine1), \
+                    mock.patch.object(mod, "predict_sunsethue", return_value=engine1), \
+                    mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
+                result = mod.run_prediction(location="杭州")
+            self.assertEqual(result["source"], "open-meteo")
+            self.assertIn("fell back to open-meteo", result["engine_note"])
+
+    def test_note_absent_without_fallback(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
+                mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
+            no_key = mod.run_prediction(location="杭州")
+        self.assertNotIn("engine_note", no_key)
+
+        sunsethue_ok = {"data": {"quality": 0.4, "time": "2026-10-19T09:30:00.000Z"}}
+        with mock.patch.object(mod, "predict_sunsethue", return_value=sunsethue_ok):
+            ok = mod.run_prediction(location="杭州")
+        self.assertNotIn("engine_note", ok)
+        self.assertEqual(ok["source"], "sunsethue")
+
+
 if __name__ == "__main__":
     unittest.main()
