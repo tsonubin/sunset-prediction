@@ -327,5 +327,44 @@ class EngineFallbackNoteTest(unittest.TestCase):
         self.assertEqual(ok["source"], "sunsethue")
 
 
+class TimezoneTest(unittest.TestCase):
+    """Coordinate callers must get local fetch and rendered event times."""
+
+    def test_coordinate_timezone_reaches_weather_and_result(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        captured = {}
+
+        def fake_fetch(lat, lng, timezone_name="Asia/Shanghai"):
+            captured["timezone"] = timezone_name
+            return meteo
+
+        with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
+                mock.patch.object(mod, "fetch_openmeteo", side_effect=fake_fetch):
+            result = mod.run_prediction(
+                lat=35.6762, lng=139.6503, timezone_name="Asia/Tokyo"
+            )
+
+        self.assertEqual(captured["timezone"], "Asia/Tokyo")
+        self.assertEqual(result["timezone"], "Asia/Tokyo")
+
+    def test_sunsethue_time_uses_requested_timezone(self):
+        sunsethue_ok = {
+            "data": {
+                "quality": 0.4,
+                "time": "2026-10-19T09:30:00.000Z",
+            }
+        }
+        with mock.patch.object(mod, "predict_sunsethue", return_value=sunsethue_ok):
+            result = mod.run_prediction(location="杭州", timezone_name="Asia/Tokyo")
+
+        self.assertIn("日落：18:30", result["discord_message"])
+
+    def test_invalid_timezone_has_actionable_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            mod.run_prediction(location="杭州", timezone_name="Mars/Olympus")
+
+        self.assertIn("invalid timezone", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

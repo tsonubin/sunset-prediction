@@ -121,7 +121,7 @@ python3 predict-sunset.py --location 北京 --discord      # 北京也行
 python3 predict-sunset.py --location 杭州 --type sunrise # 朝霞
 python3 predict-sunset.py --location 杭州 --date 2026-05-07  # 明天（预报窗口：今天~后天）
 python3 predict-sunset.py --location 杭州 --short        # 一行摘要
-python3 predict-sunset.py --lat 30.27 --lng 120.15       # 精确坐标
+python3 predict-sunset.py --lat 35.6762 --lng 139.6503 --tz Asia/Tokyo  # 坐标 + 当地时区
 ```
 
 ### Cron / Server酱自动推送
@@ -143,6 +143,7 @@ spec.loader.exec_module(mod)
 result = mod.run_prediction(location="杭州")
 print(result["discord_message"])  # 完整报告
 print(result["quality"])          # 0.76
+print(result["timezone"])         # "Asia/Shanghai"（坐标可用 timezone_name 指定 IANA 时区）
 print(result["short_summary"])    # "🔥 杭州: 76%"
 ```
 

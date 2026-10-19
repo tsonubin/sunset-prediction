@@ -181,8 +181,8 @@ python scripts/predict-sunset.py --location 杭州 --serverchan # Server酱推�
 # 高级用法
 python scripts/predict-sunset.py --location 杭州 --type sunrise  # 朝霞
 python scripts/predict-sunset.py --location 杭州 --date 2026-05-07  # 指定日期（今天~后天）
-python scripts/predict-sunset.py --lat 30.27 --lng 120.15     # 经纬度
-python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
+python scripts/predict-sunset.py --lat 35.6762 --lng 139.6503 --tz Asia/Tokyo  # 坐标 + 当地时区
+python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出（含 timezone）
 ```
 
 环境变量：
@@ -191,6 +191,7 @@ python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 |------|------|
 | `SERVERCHAN_SENDKEY` | Server酱 Turbo SendKey |
 | `SUNSET_LOCATION` | 默认城市 |
+| `SUNSET_TIMEZONE` | 可选 IANA 时区；坐标/API/cron 默认 `Asia/Shanghai` |
 | `SUNSETHUE_API_KEY` | 可选对照引擎（失败/响应异常时自动回退 Open-Meteo，`--json` 与 API 响应会带 `engine_note` 说明原因） |
 | `CRON_SECRET` | Vercel 接口鉴权 |
 
@@ -198,6 +199,11 @@ python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 （今天~后天）的日期 → CLI 打印 ❌ 并退出 1，HTTP `/api/predict` 返回 `400 Bad Request`。
 日期与 `--type` 的首尾空格/大小写会被自动规范化（如 `" 2026-05-07 "`、`Sunrise`）。
 `--json` 模式下错误也输出 JSON（`{"ok": false, "error": …}`），方便机器消费。
+
+坐标输入可用 CLI `--tz` 或 API 查询参数 `tz` 指定 IANA 时区（例如
+`Asia/Tokyo`）；未指定时保持 `Asia/Shanghai` 兼容默认。API 响应和 CLI
+`--json` 会返回实际使用的 `timezone`。内置城市仍保持当前 21 城映射，不会因时区
+参数自动增加城市名。
 
 #### 运行测试
 
