@@ -404,9 +404,11 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
     score = max(0.0, min(1.0, round(score, 2)))
 
     # ── 置信度评估 ──
-    # 数据越完整 = 置信度越高
+    # 数据完整度 × 预报时效衰减：越远的预报越不可信（GFS >48h 不可靠）
     data_points = sum(1 for v in [low_cloud, mid_cloud, high_cloud, total_cloud, humidity, visibility] if v is not None)
-    confidence = min(1.0, data_points / 6 + 0.1)
+    completeness = min(1.0, data_points / 6 + 0.1)
+    lead_factor = (1.0, 0.85, 0.70)[min(day_index, 2)]
+    confidence = round(completeness * lead_factor, 2)
 
     sunset_time = _day_value(daily, "sunset", day_index)
     sunrise_time = _day_value(daily, "sunrise", day_index)

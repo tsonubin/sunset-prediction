@@ -76,6 +76,24 @@ def _dates3():
     return [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
 
 
+_STANDARD_WEATHER = _flat(
+    cloud_cover_low=10, cloud_cover_mid=20, cloud_cover_high=50,
+    cloud_cover=30, visibility=15000, relative_humidity_2m=55,
+    precipitation_probability=10,
+)
+
+
+class ConfidenceTest(unittest.TestCase):
+    """Confidence must fall with lead time — the metric claims reliability."""
+
+    def test_confidence_decays_with_lead_time(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        conf_today = mod.compute_sunset_quality(meteo, day_index=0)["confidence"]
+        conf_day2 = mod.compute_sunset_quality(meteo, day_index=2)["confidence"]
+        self.assertGreater(conf_today, conf_day2)
+        self.assertLess(conf_day2, 0.85)  # +2d must not read 🟢高
+
+
 class DateWindowTest(unittest.TestCase):
     """F1: the requested date must select that date's forecast slice."""
 
@@ -151,12 +169,7 @@ class InputNormalizationTest(unittest.TestCase):
     """event_type accepts case/whitespace variants; junk is still rejected."""
 
     def test_event_type_normalized_and_junk_rejected(self):
-        meteo = _meteo(
-            _dates3(), ["17:30"] * 3, ["05:30"] * 3,
-            _flat(cloud_cover_low=10, cloud_cover_mid=20, cloud_cover_high=50,
-                  cloud_cover=30, visibility=15000, relative_humidity_2m=55,
-                  precipitation_probability=10),
-        )
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["05:30"] * 3, _STANDARD_WEATHER)
         with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
                 mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
             result = mod.run_prediction(location="杭州", event_type=" SUNRISE ")
