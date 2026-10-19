@@ -18,7 +18,7 @@
 - 📸 **摄影师级建议**：黄金时段精确到分钟、推荐机位、穿搭建议、器材准备清单
 - 🤖 **全自动推送**：每天 16:00 准时推送到 **Server酱（微信）** 或 Discord 格式输出——看一眼就知道今晚出不出工
 - ☁️ **Vercel 一键部署**：Serverless API + 定时 Cron，环境变量配置 SendKey
-- 🌍 **全球覆盖**：支持 21 个中国主要城市 + 任意经纬度坐标
+- 🌍 **全球覆盖**：支持 21 个内置中国城市名 + 任意经纬度坐标（非内置城市用 `--lat/--lng`，见 [references/locations.md](references/locations.md)）
 - 💰 **零成本运行**：主引擎完全免费（Open-Meteo），无需气象 API key，没有额度限制
 
 ---
@@ -223,7 +223,7 @@ sunset-prediction/
 │   └── AUDIT-2026-10-19.md       ← 审计记录（发现 + 设计决策）
 ├── tests/                        ← 定向回归测试（stdlib unittest）
 ├── references/
-│   ├── locations.md            ← 21城坐标 + 杭州8个摄影点
+│   ├── locations.md            ← 内置21城 + 坐标参考 + 杭州8个摄影点
 │   ├── sunsethue-api.md        ← Sunsethue API 参考
 │   └── serverchan-api.md       ← Server酱推送说明
 └── scripts/

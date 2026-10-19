@@ -195,7 +195,7 @@ sunset-prediction/
 │   └── AUDIT-2026-10-19.md           ← 审计记录（发现 + 设计决策）
 ├── tests/                            ← 定向回归测试（stdlib unittest）
 ├── references/
-│   ├── locations.md                    ← 21城坐标 + 杭州8个摄影点
+│   ├── locations.md                    ← 内置21城 + 坐标参考 + 杭州8个摄影点
 │   ├── serverchan-api.md               ← Server酱推送
 │   └── sunsethue-api.md               ← API 文档参考
 └── scripts/
