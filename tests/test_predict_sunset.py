@@ -1,0 +1,382 @@
+"""Targeted regression tests for the prediction engine (stdlib unittest, zero deps).
+
+Each test owns one fixed contract from docs/AUDIT-2026-10-19.md at its
+owning boundary: run_prediction (date handling), compute_sunset_quality
+(sunrise sampling, zero values), resolve_location (input validation).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import sys
+import unittest
+import urllib.request
+from datetime import datetime, timedelta
+from unittest import mock
+
+import app as app_mod
+
+mod = app_mod._load_predict_module()
+
+HOURLY_KEYS = (
+    "cloud_cover_low",
+    "cloud_cover_mid",
+    "cloud_cover_high",
+    "cloud_cover",
+    "visibility",
+    "relative_humidity_2m",
+    "precipitation_probability",
+)
+
+
+def _meteo(dates, sunset_times, sunrise_times, hour_profile):
+    """Build an Open-Meteo-shaped payload for the given local dates."""
+    hourly = {"time": []}
+    for k in HOURLY_KEYS:
+        hourly[k] = []
+    for d in dates:
+        for h in range(24):
+            hourly["time"].append(f"{d}T{h:02d}:00")
+            vals = hour_profile(h)
+            for k in HOURLY_KEYS:
+                hourly[k].append(vals[k])
+    daily = {
+        "time": list(dates),
+        "sunrise": [f"{d}T{t}" for d, t in zip(dates, sunrise_times)],
+        "sunset": [f"{d}T{t}" for d, t in zip(dates, sunset_times)],
+        "precipitation_probability_mean": [10] * len(dates),
+    }
+    return {"daily": daily, "hourly": hourly}
+
+
+def _flat(**vals):
+    return lambda h: dict(vals)
+
+
+def _no_network():
+    return mock.Mock(side_effect=AssertionError("engine must not be called"))
+
+
+def _morning_overcast(h):
+    """Overcast morning (0-8h), clear afternoon — reveals which window got sampled."""
+    if h <= 8:
+        return dict(cloud_cover_low=90, cloud_cover_mid=20, cloud_cover_high=10,
+                    cloud_cover=90, visibility=5000, relative_humidity_2m=80,
+                    precipitation_probability=10)
+    return dict(cloud_cover_low=5, cloud_cover_mid=5, cloud_cover_high=5,
+                cloud_cover=5, visibility=20000, relative_humidity_2m=50,
+                precipitation_probability=10)
+
+
+def _dates3():
+    today = datetime.now(mod.TZ_CST).date()
+    return [(today + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(3)]
+
+
+_STANDARD_WEATHER = _flat(
+    cloud_cover_low=10, cloud_cover_mid=20, cloud_cover_high=50,
+    cloud_cover=30, visibility=15000, relative_humidity_2m=55,
+    precipitation_probability=10,
+)
+
+
+class ConfidenceTest(unittest.TestCase):
+    """Confidence must fall with lead time — the metric claims reliability."""
+
+    def test_confidence_decays_with_lead_time(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        conf_today = mod.compute_sunset_quality(meteo, day_index=0)["confidence"]
+        conf_day2 = mod.compute_sunset_quality(meteo, day_index=2)["confidence"]
+        self.assertGreater(conf_today, conf_day2)
+        self.assertLess(conf_day2, 0.85)  # +2d must not read 🟢高
+
+
+class DateWindowTest(unittest.TestCase):
+    """F1: the requested date must select that date's forecast slice."""
+
+    def setUp(self):
+        self.today = datetime.now(mod.TZ_CST).date()
+        self.dates = _dates3()
+
+    def test_date_whitespace_trimmed(self):
+        date_str, day_index = mod._resolve_date(f" {self.dates[1]} ")
+        self.assertEqual((date_str, day_index), (self.dates[1], 1))
+
+    def test_requested_date_uses_that_days_data(self):
+        meteo = _meteo(
+            self.dates,
+            sunset_times=["17:30", "17:29", "17:28"],
+            sunrise_times=["06:30", "06:31", "06:32"],
+            hour_profile=_flat(
+                cloud_cover_low=10,
+                cloud_cover_mid=20,
+                cloud_cover_high=50,
+                cloud_cover=30,
+                visibility=15000,
+                relative_humidity_2m=55,
+                precipitation_probability=10,
+            ),
+        )
+        with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
+                mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
+            result = mod.run_prediction(location="杭州", date_str=self.dates[2])
+
+        self.assertEqual(result["date"], self.dates[2])
+        self.assertIn("日落：17:28", result["discord_message"])
+        self.assertNotIn("日落：17:29", result["discord_message"])
+
+    def test_invalid_dates_rejected_before_any_engine_call(self):
+        cases = [
+            "not-a-date",
+            (self.today - timedelta(days=1)).strftime("%Y-%m-%d"),
+            (self.today + timedelta(days=3)).strftime("%Y-%m-%d"),
+        ]
+        for date_str in cases:
+            with self.subTest(date=date_str), \
+                    mock.patch.object(mod, "predict_sunsethue", _no_network()), \
+                    mock.patch.object(mod, "fetch_openmeteo", _no_network()):
+                with self.assertRaises(ValueError):
+                    mod.run_prediction(location="杭州", date_str=date_str)
+
+
+class SunriseSamplingTest(unittest.TestCase):
+    """F2: sunrise quality must come from morning hours, not the sunset window."""
+
+    def setUp(self):
+        self.dates = _dates3()
+
+    def test_sunrise_scores_morning_data(self):
+        meteo = _meteo(self.dates, ["17:30"] * 3, ["05:30"] * 3, _morning_overcast)
+        result = mod.compute_sunset_quality(meteo, day_index=0, event_type="sunrise")
+        self.assertEqual(result["factors"]["cloud_type"], "overcast")
+
+    def test_sunrise_falls_back_to_morning_hour_when_event_time_unusable(self):
+        for label, drop_key in (("unparseable", False), ("missing", True)):
+            with self.subTest(case=label):
+                meteo = _meteo(self.dates, ["17:30"] * 3, [None] * 3, _morning_overcast)
+                if drop_key:
+                    del meteo["daily"]["sunrise"]
+                result = mod.compute_sunset_quality(
+                    meteo, day_index=0, event_type="sunrise"
+                )
+                self.assertEqual(result["factors"]["cloud_type"], "overcast")
+
+    def test_sunrise_formatters_use_sunrise_time(self):
+        raw = {"quality": 0.5, "source": "open-meteo",
+               "sunrise_time": "2026-10-19T06:05", "sunset_time": "2026-10-19T18:40"}
+        for msg in (
+            mod.format_serverchan_desp(raw, "杭州", "2026-10-19", "sunrise"),
+            mod.format_discord_message(raw, "杭州", "2026-10-19", "sunrise"),
+        ):
+            with self.subTest(msg=msg[:20]):
+                self.assertIn("06:05 — 06:35", msg)  # golden hour after sunrise
+                self.assertIn("05:40 — 05:55", msg)  # blue hour before sunrise
+                self.assertNotIn("18:", msg)
+
+
+class InputNormalizationTest(unittest.TestCase):
+    """event_type accepts case/whitespace variants; junk is still rejected."""
+
+    def test_event_type_normalized_and_junk_rejected(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["05:30"] * 3, _STANDARD_WEATHER)
+        with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
+                mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
+            result = mod.run_prediction(location="杭州", event_type=" SUNRISE ")
+        self.assertEqual(result["event_type"], "sunrise")
+
+        with self.assertRaises(ValueError):
+            mod.run_prediction(location="杭州", event_type="banana")
+
+
+class ZeroValueTest(unittest.TestCase):
+    """F3: a real 0 (clear-sky cloud cover) must survive into the output."""
+
+    def test_zero_cloud_cover_is_not_dropped(self):
+        meteo = _meteo(
+            _dates3(),
+            ["17:30"] * 3,
+            ["06:30"] * 3,
+            _flat(
+                cloud_cover_low=0,
+                cloud_cover_mid=0,
+                cloud_cover_high=0,
+                cloud_cover=0,
+                visibility=15000,
+                relative_humidity_2m=60,
+                precipitation_probability=0,
+            ),
+        )
+        result = mod.compute_sunset_quality(meteo, day_index=0, event_type="sunset")
+        self.assertEqual(result["cloud_cover_low"], 0)
+        self.assertEqual(result["cloud_cover_mid"], 0)
+        self.assertEqual(result["cloud_cover_high"], 0)
+        self.assertEqual(result["total_cloud_cover"], 0)
+
+
+class ResolveLocationTest(unittest.TestCase):
+    """F6: explicit bad input fails loudly; the no-input default is unchanged."""
+
+    def test_bad_inputs_rejected(self):
+        cases = [
+            (("Atlantis", None, None), "unknown location"),
+            (("杭州", 30.27, None), "together"),
+            ((None, 30.27, None), "together"),
+            (("杭州", 91.0, 120.0), "out of range"),
+            (("杭州", 30.27, 200.0), "out of range"),
+        ]
+        for args, msg in cases:
+            with self.subTest(args=args):
+                with self.assertRaises(ValueError) as ctx:
+                    mod.resolve_location(*args)
+                self.assertIn(msg, str(ctx.exception))
+
+    def test_unknown_env_location_rejected(self):
+        with mock.patch.dict(os.environ, {"SUNSET_LOCATION": "Nowhere"}):
+            with self.assertRaises(ValueError):
+                mod.resolve_location()
+
+    def test_whitespace_in_location_tolerated(self):
+        with mock.patch.dict(os.environ, {"SUNSET_LOCATION": "杭州\n"}):
+            self.assertEqual(mod.resolve_location(), (30.2741, 120.1551, "杭州"))
+        self.assertEqual(mod.resolve_location(" 杭州 "), (30.2741, 120.1551, "杭州"))
+
+    def test_defaults_and_mapped_cities_unchanged(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SUNSET_LOCATION", None)
+            self.assertEqual(mod.resolve_location(), (30.2741, 120.1551, "杭州"))
+            self.assertEqual(mod.resolve_location("北京"), (39.9042, 116.4074, "北京"))
+            self.assertEqual(
+                mod.resolve_location(None, 22.5, 114.0), (22.5, 114.0, "(22.5,114.0)")
+            )
+
+
+class SunsethueRequestTest(unittest.TestCase):
+    """Security contract: the API key travels in a header, never in the URL."""
+
+    def test_api_key_sent_as_header_not_query(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            raise RuntimeError("stop")
+
+        with mock.patch.dict(os.environ, {"SUNSETHUE_API_KEY": "sekret-key"}), \
+                mock.patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            mod.predict_sunsethue(30.27, 120.15, "2026-10-19")
+
+        self.assertNotIn("sekret-key", captured["url"])
+        self.assertNotIn("key=", captured["url"])
+        self.assertEqual(captured["headers"].get("x-api-key"), "sekret-key")
+
+
+class SparseSunsethuePayloadTest(unittest.TestCase):
+    """Null/short Sunsethue fields must not crash message formatting."""
+
+    def test_formatters_tolerate_sparse_payload(self):
+        payloads = [
+            {"quality": 0.42, "source": "sunsethue",
+             "cloud_cover": None, "direction": None, "magics": None},
+            {"quality": 0.42, "source": "sunsethue",
+             "cloud_cover": None, "direction": None,
+             "magics": {"golden_hour": ["17:17"], "blue_hour": None}},
+        ]
+        for raw in payloads:
+            with self.subTest(raw=raw):
+                for msg in (
+                    mod.format_serverchan_desp(raw, "杭州", "2026-10-19", "sunset"),
+                    mod.format_discord_message(raw, "杭州", "2026-10-19", "sunset"),
+                ):
+                    self.assertIn("杭州", msg)
+                    self.assertNotIn("None", msg)
+
+
+class JsonCliTest(unittest.TestCase):
+    """--json consumers get JSON errors, not human text."""
+
+    def test_json_error_output(self):
+        buf = io.StringIO()
+        with mock.patch.object(mod, "run_prediction", return_value={"error": "boom"}), \
+                mock.patch.object(sys, "argv", ["predict-sunset.py", "--json"]), \
+                contextlib.redirect_stdout(buf), \
+                self.assertRaises(SystemExit) as cm:
+            mod.main()
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(json.loads(buf.getvalue()), {"ok": False, "error": "boom"})
+
+
+class EngineFallbackNoteTest(unittest.TestCase):
+    """When engine 1 is attempted but unusable, the fallback must be explainable."""
+
+    def test_note_present_on_engine1_failure(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        cases = [
+            {"error": "HTTP 401: Unauthorized", "source": "sunsethue"},
+            {"data": {}},
+        ]
+        for engine1 in cases:
+            with self.subTest(engine1=engine1), \
+                    mock.patch.object(mod, "predict_sunsethue", return_value=engine1), \
+                    mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
+                result = mod.run_prediction(location="杭州")
+            self.assertEqual(result["source"], "open-meteo")
+            self.assertIn("fell back to open-meteo", result["engine_note"])
+
+    def test_note_absent_without_fallback(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
+                mock.patch.object(mod, "fetch_openmeteo", return_value=meteo):
+            no_key = mod.run_prediction(location="杭州")
+        self.assertNotIn("engine_note", no_key)
+
+        sunsethue_ok = {"data": {"quality": 0.4, "time": "2026-10-19T09:30:00.000Z"}}
+        with mock.patch.object(mod, "predict_sunsethue", return_value=sunsethue_ok):
+            ok = mod.run_prediction(location="杭州")
+        self.assertNotIn("engine_note", ok)
+        self.assertEqual(ok["source"], "sunsethue")
+
+
+class TimezoneTest(unittest.TestCase):
+    """Coordinate callers must get local fetch and rendered event times."""
+
+    def test_coordinate_timezone_reaches_weather_and_result(self):
+        meteo = _meteo(_dates3(), ["17:30"] * 3, ["06:30"] * 3, _STANDARD_WEATHER)
+        captured = {}
+
+        def fake_fetch(lat, lng, timezone_name="Asia/Shanghai"):
+            captured["timezone"] = timezone_name
+            return meteo
+
+        with mock.patch.object(mod, "predict_sunsethue", return_value=None), \
+                mock.patch.object(mod, "fetch_openmeteo", side_effect=fake_fetch):
+            result = mod.run_prediction(
+                lat=35.6762, lng=139.6503, timezone_name="Asia/Tokyo"
+            )
+
+        self.assertEqual(captured["timezone"], "Asia/Tokyo")
+        self.assertEqual(result["timezone"], "Asia/Tokyo")
+
+    def test_sunsethue_time_uses_requested_timezone(self):
+        sunsethue_ok = {
+            "data": {
+                "quality": 0.4,
+                "time": "2026-10-19T09:30:00.000Z",
+            }
+        }
+        with mock.patch.object(mod, "predict_sunsethue", return_value=sunsethue_ok):
+            result = mod.run_prediction(location="杭州", timezone_name="Asia/Tokyo")
+
+        self.assertIn("日落：18:30", result["discord_message"])
+
+    def test_invalid_timezone_has_actionable_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            mod.run_prediction(location="杭州", timezone_name="Mars/Olympus")
+
+        self.assertIn("invalid timezone", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

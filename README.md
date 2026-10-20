@@ -18,7 +18,7 @@
 - 📸 **摄影师级建议**：黄金时段精确到分钟、推荐机位、穿搭建议、器材准备清单
 - 🤖 **全自动推送**：每天 16:00 准时推送到 **Server酱（微信）** 或 Discord 格式输出——看一眼就知道今晚出不出工
 - ☁️ **Vercel 一键部署**：Serverless API + 定时 Cron，环境变量配置 SendKey
-- 🌍 **全球覆盖**：支持 21 个中国主要城市 + 任意经纬度坐标
+- 🌍 **全球覆盖**：支持 21 个内置中国城市名 + 任意经纬度坐标（非内置城市用 `--lat/--lng`，见 [references/locations.md](references/locations.md)）
 - 💰 **零成本运行**：主引擎完全免费（Open-Meteo），无需气象 API key，没有额度限制
 
 ---
@@ -70,7 +70,7 @@ python scripts/predict-sunset.py --location 杭州 --serverchan
 |------|------|------|
 | `SERVERCHAN_SENDKEY` | ✅ 推送时 | Server酱 SendKey（`SCT…`） |
 | `SUNSET_LOCATION` | 否 | 默认城市，如 `杭州` |
-| `CRON_SECRET` | 建议 | 保护 `/api/cron` 与 `?push=1` |
+| `CRON_SECRET` | ✅ 推送时 | `?push=1` 必需；同时保护 `/api/cron` |
 
 3. Deploy 后每天 **16:00（北京时间）** 自动跑 `/api/cron` 并推送  
    （`vercel.json` 中 schedule 为 `0 8 * * *` UTC）
@@ -81,10 +81,13 @@ python scripts/predict-sunset.py --location 杭州 --serverchan
 # 仅预测
 curl "https://your-app.vercel.app/api/predict?location=杭州"
 
-# 预测并推送（若设置了 CRON_SECRET）
+# 预测并推送（必须设置 CRON_SECRET，否则 401）
 curl -H "Authorization: Bearer $CRON_SECRET" \
   "https://your-app.vercel.app/api/predict?location=杭州&push=1"
 ```
+
+> 🔒 推送不可匿名触发：未设置 `CRON_SECRET` 时 `?push=1` 直接返回 401（防止被人刷推送/薅额度）。
+> `/api/cron` 在未设置时仍接受 Vercel 平台的 Cron 调用。
 
 ### 5. 本地 crontab（可选，不用 Vercel 时）
 
@@ -109,12 +112,14 @@ python predict-sunset.py --location 杭州 --date 2026-05-07
 
 ### 🎬 旅拍规划
 ```bash
-# 下周末去北京故宫怎么样？
-python predict-sunset.py --location 北京 --date 2026-05-13
+# 明天去北京故宫怎么样？
+python predict-sunset.py --location 北京 --date 2026-05-07
 
 # 🌥️ 评分：35% — 一般
-# 下周末北京晚霞一般，建议改期
+# 明天北京晚霞一般，建议改期
 ```
+
+> 📅 预报窗口为**今天 ~ 后天**（Open-Meteo 3 天预报）；更远或过去的日期会明确报错，不会拿别的日子的数据糊弄。
 
 ### 🤖 自动推送（Server酱 → 微信）
 ```
@@ -175,9 +180,9 @@ python scripts/predict-sunset.py --location 杭州 --serverchan # Server酱推�
 
 # 高级用法
 python scripts/predict-sunset.py --location 杭州 --type sunrise  # 朝霞
-python scripts/predict-sunset.py --location 杭州 --date 2026-05-07  # 指定日期
-python scripts/predict-sunset.py --lat 30.27 --lng 120.15     # 经纬度
-python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
+python scripts/predict-sunset.py --location 杭州 --date 2026-05-07  # 指定日期（今天~后天）
+python scripts/predict-sunset.py --lat 35.6762 --lng 139.6503 --tz Asia/Tokyo  # 坐标 + 当地时区
+python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出（含 timezone）
 ```
 
 环境变量：
@@ -186,8 +191,25 @@ python scripts/predict-sunset.py --location 杭州 --json       # JSON 输出
 |------|------|
 | `SERVERCHAN_SENDKEY` | Server酱 Turbo SendKey |
 | `SUNSET_LOCATION` | 默认城市 |
-| `SUNSETHUE_API_KEY` | 可选对照引擎 |
+| `SUNSET_TIMEZONE` | 可选 IANA 时区；坐标/API/cron 默认 `Asia/Shanghai` |
+| `SUNSETHUE_API_KEY` | 可选对照引擎（失败/响应异常时自动回退 Open-Meteo，`--json` 与 API 响应会带 `engine_note` 说明原因） |
 | `CRON_SECRET` | Vercel 接口鉴权 |
+
+输入非法时**明确报错**，不静默回退：未知城市名、缺失/越界经纬度、非法日期、超出预报窗口
+（今天~后天）的日期 → CLI 打印 ❌ 并退出 1，HTTP `/api/predict` 返回 `400 Bad Request`。
+日期与 `--type` 的首尾空格/大小写会被自动规范化（如 `" 2026-05-07 "`、`Sunrise`）。
+`--json` 模式下错误也输出 JSON（`{"ok": false, "error": …}`），方便机器消费。
+
+坐标输入可用 CLI `--tz` 或 API 查询参数 `tz` 指定 IANA 时区（例如
+`Asia/Tokyo`）；未指定时保持 `Asia/Shanghai` 兼容默认。API 响应和 CLI
+`--json` 会返回实际使用的 `timezone`。内置城市仍保持当前 21 城映射，不会因时区
+参数自动增加城市名。
+
+#### 运行测试
+
+```bash
+python3 -m unittest discover -s tests -t .   # 定向回归测试，秒级
+```
 
 ---
 
@@ -203,8 +225,11 @@ sunset-prediction/
 ├── .env.example                ← 环境变量模板（无真实密钥）
 ├── requirements.txt            ← Python 依赖（主引擎零第三方包）
 ├── LICENSE                     ← MIT
+├── docs/
+│   └── AUDIT-2026-10-19.md       ← 审计记录（发现 + 设计决策）
+├── tests/                        ← 定向回归测试（stdlib unittest）
 ├── references/
-│   ├── locations.md            ← 21城坐标 + 杭州8个摄影点
+│   ├── locations.md            ← 内置21城 + 坐标参考 + 杭州8个摄影点
 │   ├── sunsethue-api.md        ← Sunsethue API 参考
 │   └── serverchan-api.md       ← Server酱推送说明
 └── scripts/
@@ -224,7 +249,7 @@ sunset-prediction/
 
 ## ⚠️ 免责声明
 
-晚霞预报本质是概率性的。GFS 模型有固有误差（>48h 预报不可靠）。**本引擎会输出置信度指标**，帮助你判断预测的可靠性。建议当天 16:00 看最新预报做最终决定。
+晚霞预报本质是概率性的。GFS 模型有固有误差（>48h 预报不可靠）。**本引擎会输出置信度指标**，帮助你判断预测的可靠性。置信度 = 数据完整度 × 预报时效衰减（当天 / 明天 / 后天的上限为 100% / 85% / 70%），所以后天的预报永远不会显示 🟢高。建议当天 16:00 看最新预报做最终决定。
 
 ---
 
