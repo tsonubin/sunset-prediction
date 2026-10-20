@@ -55,6 +55,13 @@ class PushAuthTest(unittest.TestCase):
         self.assertEqual(status, "400 Bad Request")
         self.assertIn("unknown location", payload["error"])
 
+    def test_non_ascii_bearer_is_401_not_a_crash(self):
+        with mock.patch.dict(os.environ, {"CRON_SECRET": "s3cret"}):
+            status, _ = _get(
+                "/api/predict", "location=杭州&push=1", HTTP_AUTHORIZATION="Bearer é"
+            )
+        self.assertEqual(status, "401 Unauthorized")
+
 
 if __name__ == "__main__":
     unittest.main()

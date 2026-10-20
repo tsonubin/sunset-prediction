@@ -66,7 +66,10 @@ def _check_bearer(environ: dict) -> tuple[bool, str | None]:
             "Unauthorized: push requires CRON_SECRET; set it and pass "
             "Authorization: Bearer <CRON_SECRET>"
         )
-    if hmac.compare_digest(_auth_header(environ), f"Bearer {secret}"):
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str input.
+    if hmac.compare_digest(
+        _auth_header(environ).encode("utf-8"), f"Bearer {secret}".encode("utf-8")
+    ):
         return True, None
     return False, "Unauthorized: missing or invalid Authorization Bearer token"
 
