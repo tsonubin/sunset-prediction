@@ -164,6 +164,18 @@ class SunriseSamplingTest(unittest.TestCase):
                 )
                 self.assertEqual(result["factors"]["cloud_type"], "overcast")
 
+    def test_sunrise_formatters_use_sunrise_time(self):
+        raw = {"quality": 0.5, "source": "open-meteo",
+               "sunrise_time": "2026-10-19T06:05", "sunset_time": "2026-10-19T18:40"}
+        for msg in (
+            mod.format_serverchan_desp(raw, "杭州", "2026-10-19", "sunrise"),
+            mod.format_discord_message(raw, "杭州", "2026-10-19", "sunrise"),
+        ):
+            with self.subTest(msg=msg[:20]):
+                self.assertIn("06:05 — 06:35", msg)  # golden hour after sunrise
+                self.assertIn("05:40 — 05:55", msg)  # blue hour before sunrise
+                self.assertNotIn("18:", msg)
+
 
 class InputNormalizationTest(unittest.TestCase):
     """event_type accepts case/whitespace variants; junk is still rejected."""

@@ -537,20 +537,42 @@ def _sunset_cst(sunset_iso):
     return sunset_iso.split("T")[1][:5]
 
 
-def _est_golden_hour(sunset_time):
-    """估计黄金时段（日落前后各 30min）"""
-    if not sunset_time:
+def _est_golden_hour(event_time, event_type="sunset"):
+    """估计黄金时段与蓝色时刻。
+
+    日落：黄金时段为日落前 30min，蓝色时刻为日落后 10–25min；
+    日出：镜像——蓝色时刻为日出前 25–10min，黄金时段为日出后 30min。
+    """
+    if not event_time:
         return "", ""
+
+    def hm(m):
+        return f"{(m // 60) % 24:02d}:{m % 60:02d}"
+
     try:
-        parts = sunset_time.split(":")
+        parts = event_time.split(":")
         total_min = int(parts[0]) * 60 + int(parts[1])
-        start = f"{((total_min - 30)//60):02d}:{((total_min - 30)%60):02d}"
-        end = sunset_time[:5]
-        bh_start = f"{((total_min + 10)//60):02d}:{((total_min + 10)%60):02d}"
-        bh_end = f"{((total_min + 25)//60):02d}:{((total_min + 25)%60):02d}"
-        return f"{start} — {end}", f"{bh_start} — {bh_end}"
     except (ValueError, IndexError):
         return "", ""
+    if event_type == "sunrise":
+        return (
+            f"{hm(total_min)} — {hm(total_min + 30)}",
+            f"{hm(total_min - 25)} — {hm(total_min - 10)}",
+        )
+    return (
+        f"{hm(total_min - 30)} — {hm(total_min)}",
+        f"{hm(total_min + 10)} — {hm(total_min + 25)}",
+    )
+
+
+def _open_meteo_event_time(result, event_type):
+    """Open-Meteo 结果中与事件类型对应的 HH:MM（日出取 sunrise_time）。"""
+    key = "sunrise_time" if event_type == "sunrise" else "sunset_time"
+    return _sunset_cst(result.get(key, ""))
+
+
+def _default_event_time(event_type):
+    return "06:00" if event_type == "sunrise" else "18:40"
 
 
 def format_serverchan_title(result, location_name, date_str, event_type):
@@ -616,10 +638,13 @@ def format_serverchan_desp(result, location_name, date_str, event_type, tzinfo=T
                 f"- 💙 蓝色时刻：{_utc_to_local(bh[0], tzinfo)} — {_utc_to_local(bh[1], tzinfo)}"
             )
     else:
-        sunset_t = _sunset_cst(result.get("sunset_time", ""))
-        if sunset_t and event_type == "sunset":
-            time_lines.append(f"- 🌇 日落：**{sunset_t}**")
-        gold, blue = _est_golden_hour(sunset_t or "18:40")
+        sunset_t = _open_meteo_event_time(result, event_type)
+        if sunset_t:
+            if event_type == "sunset":
+                time_lines.append(f"- 🌇 日落：**{sunset_t}**")
+            else:
+                time_lines.append(f"- 🌄 日出：**{sunset_t}**")
+        gold, blue = _est_golden_hour(sunset_t or _default_event_time(event_type), event_type)
         if gold:
             time_lines.append(f"- ⏰ 黄金时段：{gold}")
         if blue:
@@ -770,9 +795,12 @@ def format_discord_message(result, location_name, date_str, event_type, tzinfo=T
             lines.insert(3, f"🌇 日落：{sunset_t}")
     else:
         # Open-Meteo 数据
-        sunset_t = _sunset_cst(result.get("sunset_time", ""))
-        if sunset_t and event_type == "sunset":
-            lines.append(f"🌇 日落：{sunset_t}")
+        sunset_t = _open_meteo_event_time(result, event_type)
+        if sunset_t:
+            if event_type == "sunset":
+                lines.append(f"🌇 日落：{sunset_t}")
+            else:
+                lines.append(f"🌄 日出：{sunset_t}")
 
         low_c = result.get("cloud_cover_low")
         mid_c = result.get("cloud_cover_mid")
@@ -825,7 +853,7 @@ def format_discord_message(result, location_name, date_str, event_type, tzinfo=T
             conf_stars = "🟢高" if conf >= 0.85 else "🟡中" if conf >= 0.65 else "🔴低"
             lines.append(f"🎯 置信度：{conf:.0%}（{conf_stars}）")
 
-        gold, blue = _est_golden_hour(sunset_t or "18:40")
+        gold, blue = _est_golden_hour(sunset_t or _default_event_time(event_type), event_type)
         if gold:
             lines.append(f"⏰ 黄金时段（估）：{gold}")
         if blue:
