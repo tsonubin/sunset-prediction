@@ -13,6 +13,7 @@ Routes:
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
@@ -58,10 +59,17 @@ def _user_agent(environ: dict) -> str:
 
 
 def _check_bearer(environ: dict) -> tuple[bool, str | None]:
+    """推送鉴权：CRON_SECRET 必须配置，未配置即拒绝（禁止匿名触发推送）。"""
     secret = os.environ.get("CRON_SECRET", "").strip()
     if not secret:
-        return True, None
-    if _auth_header(environ) == f"Bearer {secret}":
+        return False, (
+            "Unauthorized: push requires CRON_SECRET; set it and pass "
+            "Authorization: Bearer <CRON_SECRET>"
+        )
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str input.
+    if hmac.compare_digest(
+        _auth_header(environ).encode("utf-8"), f"Bearer {secret}".encode("utf-8")
+    ):
         return True, None
     return False, "Unauthorized: missing or invalid Authorization Bearer token"
 
@@ -69,10 +77,11 @@ def _check_bearer(environ: dict) -> tuple[bool, str | None]:
 def _run_and_maybe_push(
     *,
     location: str | None = None,
-    lat: float | None = None,
-    lng: float | None = None,
+    lat: float | str | None = None,
+    lng: float | str | None = None,
     date_str: str | None = None,
     event_type: str = "sunset",
+    timezone_name: str | None = None,
     push: bool = True,
 ) -> dict[str, Any]:
     mod = _load_predict_module()
@@ -82,6 +91,7 @@ def _run_and_maybe_push(
         lng=lng,
         date_str=date_str,
         event_type=event_type or "sunset",
+        timezone_name=timezone_name or os.environ.get("SUNSET_TIMEZONE") or None,
     )
     if "error" in result:
         return {"ok": False, **result}
@@ -91,12 +101,16 @@ def _run_and_maybe_push(
         "quality": result["quality"],
         "source": result["source"],
         "location": result["location"],
+        "coordinates": result["coordinates"],
+        "timezone": result["timezone"],
         "date": result["date"],
         "event_type": result["event_type"],
         "short_summary": result["short_summary"],
         "message": result["discord_message"],
         "serverchan_title": result["serverchan_title"],
     }
+    if "engine_note" in result:
+        out["engine_note"] = result["engine_note"]
 
     if push:
         push_result = mod.send_serverchan(
@@ -141,12 +155,8 @@ def _handle_predict(environ: dict) -> tuple[int, list[tuple[str, str]], bytes]:
     location = q.get("location") or os.environ.get("SUNSET_LOCATION") or None
     date_str = q.get("date") or None
     event_type = q.get("type") or "sunset"
+    timezone_name = q.get("tz") or os.environ.get("SUNSET_TIMEZONE") or None
     push = str(q.get("push", "0")).lower() in {"1", "true", "yes", "on"}
-
-    lat = q.get("lat")
-    lng = q.get("lng")
-    lat_f = float(lat) if lat not in (None, "") else None
-    lng_f = float(lng) if lng not in (None, "") else None
 
     if push:
         ok, err = _check_bearer(environ)
@@ -156,12 +166,15 @@ def _handle_predict(environ: dict) -> tuple[int, list[tuple[str, str]], bytes]:
     try:
         result = _run_and_maybe_push(
             location=location,
-            lat=lat_f,
-            lng=lng_f,
+            lat=q.get("lat") or None,
+            lng=q.get("lng") or None,
             date_str=date_str,
             event_type=event_type,
+            timezone_name=timezone_name,
             push=push,
         )
+    except ValueError as e:
+        return _json(400, {"ok": False, "error": str(e)})
     except Exception as e:
         return _json(500, {"ok": False, "error": str(e)})
 
@@ -189,13 +202,17 @@ def _handle_cron(environ: dict) -> tuple[int, list[tuple[str, str]], bytes]:
 
     location = os.environ.get("SUNSET_LOCATION") or "杭州"
     event_type = os.environ.get("SUNSET_EVENT_TYPE") or "sunset"
+    timezone_name = os.environ.get("SUNSET_TIMEZONE") or None
 
     try:
         result = _run_and_maybe_push(
             location=location,
             event_type=event_type,
+            timezone_name=timezone_name,
             push=True,
         )
+    except ValueError as e:
+        return _json(400, {"ok": False, "error": str(e)})
     except Exception as e:
         return _json(500, {"ok": False, "error": str(e)})
 
@@ -232,6 +249,7 @@ def app(environ: dict, start_response: Callable) -> list[bytes]:
 
     reason = {
         200: "OK",
+        400: "Bad Request",
         401: "Unauthorized",
         404: "Not Found",
         405: "Method Not Allowed",

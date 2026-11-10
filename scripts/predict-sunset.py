@@ -28,7 +28,8 @@ import sys
 import urllib.error
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # ── 城市坐标映射 ─────────────────────────────────────────────
 
@@ -68,7 +69,11 @@ HANGZHOU_SPOTS = [
     ("白塔公园", "铁轨+樱花（春）+晚霞"),
 ]
 
-TZ_CST = timezone(timedelta(hours=8), "Asia/Shanghai")
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+TZ_CST = ZoneInfo(DEFAULT_TIMEZONE)
+
+# Open-Meteo 预报窗口（天），与 fetch_openmeteo 的 forecast_days 保持一致
+FORECAST_DAYS = 3
 
 
 # ── 工具函数 ─────────────────────────────────────────────────
@@ -158,28 +163,49 @@ def send_serverchan(title, desp="", sendkey=None, short=None):
     return result
 
 
-def _hour_index_for_date(hourly_times, target_date, sunset_hour=18):
+def _hour_index_for_date(hourly_times, target_date, event_hour=18):
     """
-    找到 target_date 当天 sunset_hour 点在 hourly 数组中的索引。
-    如果 sunset_hour 不在，找最接近的下午时段（16-19 点）。
+    找到 target_date 当天事件时点（event_hour）在 hourly 数组中的索引。
+    候选窗口为事件前 2 小时到事件后 1 小时，取最接近事件时点的小时；
+    日落 ~18 点即原 16-19 点窗口，日出则落在清晨。
     """
     target_prefix = target_date + "T"
+    lo, hi = event_hour - 2, event_hour + 1
     candidates = []
     for i, t in enumerate(hourly_times):
         if t.startswith(target_prefix):
-            h = int(t.split("T")[1].split(":")[0])
-            if 16 <= h <= 19:
-                candidates.append((abs(h - sunset_hour), i, h))
+            try:
+                h = int(t.split("T")[1].split(":")[0])
+            except (ValueError, IndexError):
+                continue  # 上游脏时间戳，跳过而不是整体失败
+            if lo <= h <= hi:
+                candidates.append((abs(h - event_hour), i, h))
     if candidates:
         candidates.sort()
-        return candidates[0][1]  # 最接近日落的小时索引
+        return candidates[0][1]  # 最接近事件时点的小时索引
     return None
+
+
+def _day_value(daily, key, day_index, default=""):
+    """安全取 daily 序列第 day_index 天的值；缺失 / null / 越界时返回 default。"""
+    vals = daily.get(key) or []
+    if 0 <= day_index < len(vals) and vals[day_index] is not None:
+        return vals[day_index]
+    return default
+
+def _resolve_timezone(tz_name=None):
+    """解析并校验 IANA 时区名，返回 (name, tzinfo)。"""
+    name = str(tz_name or DEFAULT_TIMEZONE).strip()
+    try:
+        return name, ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"invalid timezone {name!r}; expected an IANA timezone") from None
 
 
 # ── 引擎 1：Sunsethue API ──────────────────────────────────
 
 def predict_sunsethue(lat, lng, date_str, event_type="sunset"):
-    """调用 Sunsethue API 获取日落质量预测"""
+    """调用 Sunsethue API 获取日落质量预测（key 走 X-API-Key 头，不进 URL/日志）"""
     api_key = os.environ.get("SUNSETHUE_API_KEY", "")
     if not api_key:
         return None
@@ -188,8 +214,8 @@ def predict_sunsethue(lat, lng, date_str, event_type="sunset"):
         "latitude": lat, "longitude": lng,
         "date": date_str, "type": event_type,
     })
-    url = f"https://api.sunsethue.com/event?{params}&key={api_key}"
-    data = _http_get(url)
+    url = f"https://api.sunsethue.com/event?{params}"
+    data = _http_get(url, headers={"Accept": "application/json", "X-API-Key": api_key})
     if "_error" in data:
         return {"error": data["_error"], "source": "sunsethue"}
     return data
@@ -197,8 +223,8 @@ def predict_sunsethue(lat, lng, date_str, event_type="sunset"):
 
 # ── 引擎 2：Open-Meteo 免费 API ───────────────────────────
 
-def fetch_openmeteo(lat, lng):
-    """从 Open-Meteo 获取天气数据（免费，无 key）"""
+def fetch_openmeteo(lat, lng, timezone_name=DEFAULT_TIMEZONE):
+    """从 Open-Meteo 获取天气数据（免费，无 key）。"""
     # 同时获取 daily（日落时间+降水）+ hourly（分层云量+湿度）
     params = urllib.parse.urlencode({
         "latitude": lat, "longitude": lng,
@@ -206,8 +232,8 @@ def fetch_openmeteo(lat, lng):
         "hourly": "cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
                   "cloud_cover,visibility,"
                   "relative_humidity_2m,precipitation_probability",
-        "timezone": "Asia/Shanghai",
-        "forecast_days": 3,
+        "timezone": timezone_name,
+        "forecast_days": FORECAST_DAYS,
     })
     url = f"https://api.open-meteo.com/v1/forecast?{params}"
     return _http_get(url)
@@ -231,24 +257,25 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
         return None
 
     time_key = "sunset" if event_type == "sunset" else "sunrise"
-    event_time_str = daily.get(time_key, [""] * 3)[day_index] or ""
-    date_str = daily.get("time", [""] * 3)[day_index] or ""
+    event_time_str = _day_value(daily, time_key, day_index)
+    date_str = _day_value(daily, "time", day_index)
 
-    event_hour = 18
+    # 事件时间缺失/不可解析时的兜底小时：日落 18 点，日出 6 点（勿再退到傍晚窗口）
+    event_hour = 18 if event_type == "sunset" else 6
     if event_time_str and "T" in event_time_str:
         try:
             event_hour = int(event_time_str.split("T")[1].split(":")[0])
         except (ValueError, IndexError):
             pass
 
-    rain_prob = daily.get("precipitation_probability_mean", [0] * 3)[day_index] or 0
+    rain_prob = _day_value(daily, "precipitation_probability_mean", day_index, 0) or 0
     hourly_times = hourly.get("time", [])
     idx = _hour_index_for_date(hourly_times, date_str, event_hour)
 
     if idx is None:
-        return {"error": f"找不到 {date_str} 日落时段的小时数据"}
+        return {"error": f"找不到 {date_str} 对应时段的小时数据"}
 
-    # 取日落前后 3h 窗口
+    # 取事件前 1h ~ 后 2h 窗口
     start_idx = max(0, idx - 1)
     end_idx = min(len(hourly_times), idx + 3)
 
@@ -262,7 +289,7 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
     total_cloud = safe_avg("cloud_cover")
     humidity = safe_avg("relative_humidity_2m")
     visibility = safe_avg("visibility")
-    vis_km = visibility / 1000 if visibility else None
+    vis_km = visibility / 1000 if visibility is not None else None
 
     # ════════════════════════════════════════════
     # ⭐ v2.0 多因子评分模型
@@ -387,24 +414,26 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
     score = max(0.0, min(1.0, round(score, 2)))
 
     # ── 置信度评估 ──
-    # 数据越完整 = 置信度越高
+    # 数据完整度 × 预报时效衰减：越远的预报越不可信（GFS >48h 不可靠）
     data_points = sum(1 for v in [low_cloud, mid_cloud, high_cloud, total_cloud, humidity, visibility] if v is not None)
-    confidence = min(1.0, data_points / 6 + 0.1)
+    completeness = min(1.0, data_points / 6 + 0.1)
+    lead_factor = (1.0, 0.85, 0.70)[min(day_index, 2)]
+    confidence = round(completeness * lead_factor, 2)
 
-    sunset_time = daily.get("sunset", [""] * 3)[day_index] or ""
-    sunrise_time = daily.get("sunrise", [""] * 3)[day_index] or ""
+    sunset_time = _day_value(daily, "sunset", day_index)
+    sunrise_time = _day_value(daily, "sunrise", day_index)
 
     return {
         "quality": score,
         "source": "open-meteo",
         "confidence": round(confidence, 2),
-        "cloud_cover_low": round(low_cloud, 0) if low_cloud else None,
-        "cloud_cover_mid": round(mid_cloud, 0) if mid_cloud else None,
-        "cloud_cover_high": round(high_cloud, 0) if high_cloud else None,
-        "total_cloud_cover": round(total_cloud, 0) if total_cloud else None,
-        "visibility_km": round(vis_km, 1) if vis_km else None,
+        "cloud_cover_low": round(low_cloud, 0) if low_cloud is not None else None,
+        "cloud_cover_mid": round(mid_cloud, 0) if mid_cloud is not None else None,
+        "cloud_cover_high": round(high_cloud, 0) if high_cloud is not None else None,
+        "total_cloud_cover": round(total_cloud, 0) if total_cloud is not None else None,
+        "visibility_km": round(vis_km, 1) if vis_km is not None else None,
         "rain_probability": round(rain_prob, 0),
-        "humidity": round(humidity, 0) if humidity else None,
+        "humidity": round(humidity, 0) if humidity is not None else None,
         "sunset_time": sunset_time,
         "sunrise_time": sunrise_time,
         "factors": factors,
@@ -414,22 +443,59 @@ def compute_sunset_quality(meteo_data, day_index=0, event_type="sunset"):
 # ── 位置解析 ────────────────────────────────────────────────
 
 def resolve_location(location=None, lat=None, lng=None):
-    """级联位置解析：手动坐标 > 城市名 > 环境变量 > 默认杭州"""
-    if lat is not None and lng is not None:
-        return float(lat), float(lng), f"({lat},{lng})"
+    """
+    级联位置解析：手动坐标 > 城市名 > 环境变量 > 默认杭州。
+    显式输入非法（未知城市、坐标缺失/越界）时抛 ValueError，不静默回退。
+    """
+    if (lat is None) != (lng is None):
+        raise ValueError("lat and lng must be provided together")
+    if lat is not None:
+        try:
+            lat, lng = float(lat), float(lng)
+        except (TypeError, ValueError):
+            raise ValueError(f"lat/lng must be numeric, got ({lat!r}, {lng!r})") from None
+        if not -90 <= lat <= 90 or not -180 <= lng <= 180:
+            raise ValueError(f"coordinates out of range: ({lat}, {lng})")
+        return lat, lng, f"({lat},{lng})"
 
+    location = (location or "").strip()
     if location:
         loc = LOCATION_MAP.get(location)
-        if loc:
-            return loc[0], loc[1], location
+        if loc is None:
+            raise ValueError(
+                f"unknown location {location!r}; see references/locations.md "
+                "for mapped cities, or pass lat/lng"
+            )
+        return loc[0], loc[1], location
 
-    env_loc = os.environ.get("SUNSET_LOCATION", "")
+    env_loc = os.environ.get("SUNSET_LOCATION", "").strip()
     if env_loc:
         loc = LOCATION_MAP.get(env_loc)
-        if loc:
-            return loc[0], loc[1], env_loc
+        if loc is None:
+            raise ValueError(f"SUNSET_LOCATION {env_loc!r} is not a mapped city")
+        return loc[0], loc[1], env_loc
 
     return 30.2741, 120.1551, "杭州"
+
+
+def _resolve_date(date_str, tzinfo=TZ_CST):
+    """
+    校验预测日期，返回 (date_str, day_index)。
+    Open-Meteo 只提供今天起 FORECAST_DAYS 天的预报，过去的/超窗的日期抛 ValueError。
+    """
+    today = datetime.now(tzinfo).date()
+    date_str = str(date_str or "").strip()
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid date {date_str!r}, expected YYYY-MM-DD") from None
+    offset = (day - today).days
+    if not 0 <= offset < FORECAST_DAYS:
+        end = (today + timedelta(days=FORECAST_DAYS - 1)).strftime("%Y-%m-%d")
+        raise ValueError(
+            f"date {date_str} outside forecast window {today.strftime('%Y-%m-%d')}..{end}"
+        )
+    return date_str, offset
 
 
 # ── 格式化输出 ──────────────────────────────────────────────
@@ -450,16 +516,18 @@ def quality_label(score):
     return "很差，改天吧 ☁️"
 
 
-def _utc_to_cst(utc_iso):
-    """将 UTC ISO 时间转为 CST HH:MM，带容错"""
+def _utc_to_local(utc_iso, tzinfo=TZ_CST):
+    """将 UTC ISO 时间转为目标时区 HH:MM，带容错。"""
     if not utc_iso or "T" not in utc_iso:
         return utc_iso
     try:
         raw = utc_iso.replace("Z", "+00:00")
         dt = datetime.fromisoformat(raw)
-        return dt.astimezone(TZ_CST).strftime("%H:%M")
+        return dt.astimezone(tzinfo).strftime("%H:%M")
     except Exception:
         return utc_iso[:16]
+
+
 
 
 def _sunset_cst(sunset_iso):
@@ -469,20 +537,42 @@ def _sunset_cst(sunset_iso):
     return sunset_iso.split("T")[1][:5]
 
 
-def _est_golden_hour(sunset_time):
-    """估计黄金时段（日落前后各 30min）"""
-    if not sunset_time:
+def _est_golden_hour(event_time, event_type="sunset"):
+    """估计黄金时段与蓝色时刻。
+
+    日落：黄金时段为日落前 30min，蓝色时刻为日落后 10–25min；
+    日出：镜像——蓝色时刻为日出前 25–10min，黄金时段为日出后 30min。
+    """
+    if not event_time:
         return "", ""
+
+    def hm(m):
+        return f"{(m // 60) % 24:02d}:{m % 60:02d}"
+
     try:
-        parts = sunset_time.split(":")
+        parts = event_time.split(":")
         total_min = int(parts[0]) * 60 + int(parts[1])
-        start = f"{((total_min - 30)//60):02d}:{((total_min - 30)%60):02d}"
-        end = sunset_time[:5]
-        bh_start = f"{((total_min + 10)//60):02d}:{((total_min + 10)%60):02d}"
-        bh_end = f"{((total_min + 25)//60):02d}:{((total_min + 25)%60):02d}"
-        return f"{start} — {end}", f"{bh_start} — {bh_end}"
     except (ValueError, IndexError):
         return "", ""
+    if event_type == "sunrise":
+        return (
+            f"{hm(total_min)} — {hm(total_min + 30)}",
+            f"{hm(total_min - 25)} — {hm(total_min - 10)}",
+        )
+    return (
+        f"{hm(total_min - 30)} — {hm(total_min)}",
+        f"{hm(total_min + 10)} — {hm(total_min + 25)}",
+    )
+
+
+def _open_meteo_event_time(result, event_type):
+    """Open-Meteo 结果中与事件类型对应的 HH:MM（日出取 sunrise_time）。"""
+    key = "sunrise_time" if event_type == "sunrise" else "sunset_time"
+    return _sunset_cst(result.get(key, ""))
+
+
+def _default_event_time(event_type):
+    return "06:00" if event_type == "sunrise" else "18:40"
 
 
 def format_serverchan_title(result, location_name, date_str, event_type):
@@ -504,7 +594,7 @@ def _cloud_type_label(factors):
     }.get(cloud_type, "")
 
 
-def format_serverchan_desp(result, location_name, date_str, event_type):
+def format_serverchan_desp(result, location_name, date_str, event_type, tzinfo=TZ_CST):
     """
     Server酱正文（Markdown）。
 
@@ -536,22 +626,25 @@ def format_serverchan_desp(result, location_name, date_str, event_type):
         sunset_t = result.get("sunset_time_local", "")
         if sunset_t:
             time_lines.append(f"- 🌇 日落：**{sunset_t}**")
-        magics = result.get("magics", {}) or {}
-        if magics.get("golden_hour"):
-            gh = magics["golden_hour"]
+        magics = result.get("magics") or {}
+        gh = magics.get("golden_hour") or ()
+        if len(gh) >= 2:
             time_lines.append(
-                f"- ⏰ 黄金时段：{_utc_to_cst(gh[0])} — {_utc_to_cst(gh[1])}"
+                f"- ⏰ 黄金时段：{_utc_to_local(gh[0], tzinfo)} — {_utc_to_local(gh[1], tzinfo)}"
             )
-        if magics.get("blue_hour"):
-            bh = magics["blue_hour"]
+        bh = magics.get("blue_hour") or ()
+        if len(bh) >= 2:
             time_lines.append(
-                f"- 💙 蓝色时刻：{_utc_to_cst(bh[0])} — {_utc_to_cst(bh[1])}"
+                f"- 💙 蓝色时刻：{_utc_to_local(bh[0], tzinfo)} — {_utc_to_local(bh[1], tzinfo)}"
             )
     else:
-        sunset_t = _sunset_cst(result.get("sunset_time", ""))
-        if sunset_t and event_type == "sunset":
-            time_lines.append(f"- 🌇 日落：**{sunset_t}**")
-        gold, blue = _est_golden_hour(sunset_t or "18:40")
+        sunset_t = _open_meteo_event_time(result, event_type)
+        if sunset_t:
+            if event_type == "sunset":
+                time_lines.append(f"- 🌇 日落：**{sunset_t}**")
+            else:
+                time_lines.append(f"- 🌄 日出：**{sunset_t}**")
+        gold, blue = _est_golden_hour(sunset_t or _default_event_time(event_type), event_type)
         if gold:
             time_lines.append(f"- ⏰ 黄金时段：{gold}")
         if blue:
@@ -567,8 +660,9 @@ def format_serverchan_desp(result, location_name, date_str, event_type):
         cloud = result.get("cloud_cover")
         if cloud is not None:
             weather_lines.append(f"- ☁️ 云量：{cloud * 100:.0f}%")
-        if "direction" in result:
-            weather_lines.append(f"- 🧭 日落方向：{result['direction']:.0f}°")
+        direction = result.get("direction")
+        if direction is not None:
+            weather_lines.append(f"- 🧭 日落方向：{direction:.0f}°")
     else:
         ctype = _cloud_type_label(factors)
         if ctype:
@@ -654,13 +748,13 @@ def format_serverchan_desp(result, location_name, date_str, event_type):
         blocks.append("### 📍 推荐机位")
         blocks.append("\n".join(spot_lines))
 
-    blocks.append(f"_预报更新 {datetime.now(TZ_CST).strftime('%H:%M')}_")
+    blocks.append(f"_预报更新 {datetime.now(tzinfo).strftime('%H:%M')}_")
 
     # 段落之间空行 → Server酱 Markdown 才不会挤成一坨
     return "\n\n".join(blocks)
 
 
-def format_discord_message(result, location_name, date_str, event_type):
+def format_discord_message(result, location_name, date_str, event_type, tzinfo=TZ_CST):
     """生成 Discord / 通用可读报告"""
     quality = result.get("quality", 0)
     emoji = quality_emoji(quality)
@@ -685,28 +779,28 @@ def format_discord_message(result, location_name, date_str, event_type):
         cloud = result.get("cloud_cover")
         if cloud is not None:
             lines.append(f"☁️ 云量：{cloud*100:.0f}%")
-        if "direction" in result:
-            lines.append(f"🧭 日落方向：{result['direction']:.0f}°")
+        direction = result.get("direction")
+        if direction is not None:
+            lines.append(f"🧭 日落方向：{direction:.0f}°")
 
-        magics = result.get("magics", {})
-        if magics.get("golden_hour"):
-            gh = magics["golden_hour"]
-            gh_start = _utc_to_cst(gh[0])
-            gh_end = _utc_to_cst(gh[1])
-            lines.append(f"⏰ 黄金时段：{gh_start} — {gh_end}")
-        if magics.get("blue_hour"):
-            bh = magics["blue_hour"]
-            bh_start = _utc_to_cst(bh[0])
-            bh_end = _utc_to_cst(bh[1])
-            lines.append(f"⏰ 蓝色时刻：{bh_start} — {bh_end}")
+        magics = result.get("magics") or {}
+        gh = magics.get("golden_hour") or ()
+        if len(gh) >= 2:
+            lines.append(f"⏰ 黄金时段：{_utc_to_local(gh[0], tzinfo)} — {_utc_to_local(gh[1], tzinfo)}")
+        bh = magics.get("blue_hour") or ()
+        if len(bh) >= 2:
+            lines.append(f"⏰ 蓝色时刻：{_utc_to_local(bh[0], tzinfo)} — {_utc_to_local(bh[1], tzinfo)}")
         sunset_t = result.get("sunset_time_local", "")
         if sunset_t:
             lines.insert(3, f"🌇 日落：{sunset_t}")
     else:
         # Open-Meteo 数据
-        sunset_t = _sunset_cst(result.get("sunset_time", ""))
-        if sunset_t and event_type == "sunset":
-            lines.append(f"🌇 日落：{sunset_t}")
+        sunset_t = _open_meteo_event_time(result, event_type)
+        if sunset_t:
+            if event_type == "sunset":
+                lines.append(f"🌇 日落：{sunset_t}")
+            else:
+                lines.append(f"🌄 日出：{sunset_t}")
 
         low_c = result.get("cloud_cover_low")
         mid_c = result.get("cloud_cover_mid")
@@ -759,7 +853,7 @@ def format_discord_message(result, location_name, date_str, event_type):
             conf_stars = "🟢高" if conf >= 0.85 else "🟡中" if conf >= 0.65 else "🔴低"
             lines.append(f"🎯 置信度：{conf:.0%}（{conf_stars}）")
 
-        gold, blue = _est_golden_hour(sunset_t or "18:40")
+        gold, blue = _est_golden_hour(sunset_t or _default_event_time(event_type), event_type)
         if gold:
             lines.append(f"⏰ 黄金时段（估）：{gold}")
         if blue:
@@ -790,7 +884,7 @@ def format_discord_message(result, location_name, date_str, event_type):
             lines.append(f"• {spot} — {desc}")
 
     lines.append("")
-    lines.append(f"🕐 预报更新：{datetime.now(TZ_CST).strftime('%H:%M')}")
+    lines.append(f"🕐 预报更新：{datetime.now(tzinfo).strftime('%H:%M')}")
 
     return "\n".join(lines)
 
@@ -798,25 +892,34 @@ def format_discord_message(result, location_name, date_str, event_type):
 # ── 主流程 ──────────────────────────────────────────────────
 
 def run_prediction(location=None, lat=None, lng=None,
-                   date_str=None, event_type="sunset"):
+                   date_str=None, event_type="sunset",
+                   timezone_name=None):
     """
     执行日落/日出质量预测。
     返回 dict { quality, source, discord_message, short_summary, ... }
+    输入非法（日期格式/范围、未知位置、事件类型）时抛 ValueError。
     """
     resolved_lat, resolved_lng, location_name = resolve_location(location, lat, lng)
+    timezone_name, tzinfo = _resolve_timezone(timezone_name)
 
-    if not date_str:
-        date_str = datetime.now(TZ_CST).strftime("%Y-%m-%d")
+    event_type = str(event_type or "").strip().lower()
+    if event_type not in ("sunset", "sunrise"):
+        raise ValueError(f"invalid type {event_type!r}, expected sunset or sunrise")
 
-    today_str = datetime.now(TZ_CST).strftime("%Y-%m-%d")
-    day_index = 0 if date_str == today_str else 1
+    if date_str:
+        date_str, day_index = _resolve_date(date_str, tzinfo)
+    else:
+        date_str = datetime.now(tzinfo).strftime("%Y-%m-%d")
+        day_index = 0
 
     # ── 引擎 1：尝试 Sunsethue ──
     result = predict_sunsethue(resolved_lat, resolved_lng, date_str, event_type)
-    if result and "error" not in result:
-        data = result.get("data", {})
+    data = (result or {}).get("data") or {}
+    quality = data.get("quality")
+    engine_note = None
+    if result and "error" not in result and isinstance(quality, (int, float)):
         raw = {
-            "quality": data.get("quality", 0.5),
+            "quality": max(0.0, min(1.0, float(quality))),
             "cloud_cover": data.get("cloud_cover"),
             "direction": data.get("direction"),
             "magics": data.get("magics", {}),
@@ -827,29 +930,43 @@ def run_prediction(location=None, lat=None, lng=None,
         if sunset_t_raw:
             try:
                 dt = datetime.fromisoformat(sunset_t_raw.replace("Z", "+00:00"))
-                raw["sunset_time_local"] = dt.astimezone(TZ_CST).strftime("%H:%M")
+                raw["sunset_time_local"] = dt.astimezone(tzinfo).strftime("%H:%M")
             except Exception:
                 pass
     else:
-        # ── 引擎 2：Open-Meteo 兜底 ──
-        meteo = fetch_openmeteo(resolved_lat, resolved_lng)
+        # ── 引擎 2：Open-Meteo 兜底（引擎 1 未配置/失败/响应缺 quality 时） ──
+        if result is not None:
+            # key 已配置、请求已发出但未被采用 → 留下可诊断的回退原因
+            engine_note = (
+                f"engine1(sunsethue) failed: {result['error']}; fell back to open-meteo"
+                if "error" in result
+                else "engine1(sunsethue) returned no data.quality; fell back to open-meteo"
+            )
+        meteo = fetch_openmeteo(resolved_lat, resolved_lng, timezone_name)
         if "_error" in meteo:
             return {"error": f"Open-Meteo 请求失败: {meteo['_error']}", "source": "failed"}
 
         raw = compute_sunset_quality(meteo, day_index=day_index, event_type=event_type)
-        if raw is None or "error" in (raw or {}):
-            return {"error": f"云量解析失败: {raw}", "source": "failed"}
+        if raw is None:
+            return {"error": "云量解析失败: 气象数据缺少 daily/hourly", "source": "failed"}
+        if "error" in raw:
+            return {"error": f"云量解析失败: {raw['error']}", "source": "failed"}
 
-    discord_msg = format_discord_message(raw, location_name, date_str, event_type)
+    discord_msg = format_discord_message(
+        raw, location_name, date_str, event_type, tzinfo=tzinfo
+    )
     short_summary = f"{quality_emoji(raw['quality'])} {location_name} {date_str}: {raw['quality']:.0%}"
     sc_title = format_serverchan_title(raw, location_name, date_str, event_type)
-    sc_desp = format_serverchan_desp(raw, location_name, date_str, event_type)
+    sc_desp = format_serverchan_desp(
+        raw, location_name, date_str, event_type, tzinfo=tzinfo
+    )
 
-    return {
+    out = {
         "quality": raw["quality"],
         "source": raw["source"],
         "location": location_name,
         "coordinates": (resolved_lat, resolved_lng),
+        "timezone": timezone_name,
         "date": date_str,
         "event_type": event_type,
         "short_summary": short_summary,
@@ -857,9 +974,21 @@ def run_prediction(location=None, lat=None, lng=None,
         "serverchan_title": sc_title,
         "serverchan_desp": sc_desp,
     }
+    if engine_note:
+        out["engine_note"] = engine_note
+    return out
 
 
 # ── CLI 入口 ────────────────────────────────────────────────
+
+def _fail(message, as_json):
+    """错误输出：--json 给机器可读 JSON（stdout），否则给人类可读一行。"""
+    if as_json:
+        print(json.dumps({"ok": False, "error": message}, ensure_ascii=False))
+    else:
+        print(f"❌ {message}")
+    sys.exit(1)
+
 
 def main():
     import argparse
@@ -868,7 +997,12 @@ def main():
     parser.add_argument("--lat", type=float, default=None)
     parser.add_argument("--lng", type=float, default=None)
     parser.add_argument("--date", type=str, default=None)
-    parser.add_argument("--type", dest="event_type", type=str,
+    parser.add_argument(
+        "--tz", dest="timezone_name", default=None,
+        help="IANA timezone for local times (default Asia/Shanghai)",
+    )
+    parser.add_argument("--type", dest="event_type",
+                        type=lambda s: s.strip().lower(),
                         default="sunset", choices=["sunset", "sunrise"])
     parser.add_argument("--discord", action="store_true",
                         help="输出 Discord/可读报告格式（默认）")
@@ -878,14 +1012,17 @@ def main():
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
-    result = run_prediction(
-        location=args.location, lat=args.lat, lng=args.lng,
-        date_str=args.date, event_type=args.event_type,
-    )
+    try:
+        result = run_prediction(
+            location=args.location, lat=args.lat, lng=args.lng,
+            date_str=args.date, event_type=args.event_type,
+            timezone_name=args.timezone_name,
+        )
+    except ValueError as e:
+        _fail(str(e), args.json)
 
     if "error" in result:
-        print(f"❌ {result['error']}")
-        sys.exit(1)
+        _fail(result["error"], args.json)
 
     push_result = None
     if args.serverchan:
@@ -908,9 +1045,12 @@ def main():
             "quality": result["quality"],
             "source": result["source"],
             "location": result["location"],
+            "timezone": result["timezone"],
             "date": result["date"],
             "short": result["short_summary"],
         }
+        if "engine_note" in result:
+            payload["engine_note"] = result["engine_note"]
         if push_result is not None:
             payload["serverchan"] = push_result
         print(json.dumps(payload, ensure_ascii=False, indent=2))
